@@ -14,59 +14,54 @@ if not VOL_FILE.exists():
     VOL_FILE.write_text(json.dumps({"current_volume": 1, "next_page": 1, "max_pages_per_volume": 800}, indent=2))
 vol_state = json.loads(VOL_FILE.read_text())
 
-EXPECTED = ["Case Title", "Docket", "Decision Date", "Court", "Judge", "Disposition", "Keywords", "Summary"]
+# -------- Header spec (first 10 non-blank lines) --------
+HEADER_KEYS = [
+    "Case Title", "Docket", "Decision Date", "Court", "Judge",
+    "Disposition", "Keywords", "Summary", "Reporter Override", "Slip Override"
+]
+HEADER_LINES_REQUIRED = 10
 
 # ---------- header parsing helpers ----------
 def uclean(s: str) -> str:
+    """Normalize unicode and collapse odd spaces/colons so header keys match reliably."""
     s = unicodedata.normalize("NFKC", s or "")
     s = s.replace("：", ":").replace("\u00a0", " ")
     s = re.sub(r"[ \t]+", " ", s)
     return s
 
 def parse_header_from_text(text: str):
-    """Flexible, case-insensitive header parser that tolerates OCR spacing."""
-    text = uclean(text)
-    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
-    hdr = {}
-    patterns = {
-        "Case Title":    re.compile(r"^case\s*title\s*:\s*(.+)$", re.I),
-        "Docket":        re.compile(r"^docket\s*:\s*(.+)$", re.I),
-        "Decision Date": re.compile(r"^decision\s*date\s*:\s*(.+)$", re.I),
-        "Court":         re.compile(r"^court\s*:\s*(.+)$", re.I),
-        "Judge":         re.compile(r"^judge\s*:\s*(.+)$", re.I),
-        "Disposition":   re.compile(r"^disposition\s*:\s*(.+)$", re.I),
-        "Keywords":      re.compile(r"^keywords\s*:\s*(.+)$", re.I),
-        "Summary":       re.compile(r"^summary\s*:\s*(.+)$", re.I),
-    }
-    search_lines = lines[:100]  # search deeper to be safe
-    for key, rx in patterns.items():
-        val = "MISSING DATA"
-        for ln in search_lines:
-            m = rx.match(ln)
-            if m:
-                val = m.group(1).strip()
-                break
-        hdr[key] = val
+    """
+    Read only the first 10 non-blank lines and extract KEY: value pairs.
+    If a key is absent, leave it as empty string.
+    Enforce the standard Court line regardless of input.
+    """
+    text  = uclean(text)
+    lines = [ln.strip() for ln in text.splitlines() if ln.strip()][:HEADER_LINES_REQUIRED]
+    hdr = {k: "" for k in HEADER_KEYS}
 
-    # If Decision Date still missing, scan whole first-page text
-    if hdr["Decision Date"] == "MISSING DATA":
-        m = re.search(r"decision\s*date\s*:\s*([^\n]+)", text, re.I)
-        if m: hdr["Decision Date"] = m.group(1).strip()
+    for ln in lines:
+        m = re.match(r"^([A-Za-z ]+)\s*:\s*(.*)$", ln)
+        if not m:
+            continue
+        key = m.group(1).strip()
+        val = m.group(2).strip()
+        if key in hdr:
+            hdr[key] = val
 
-    # Standardize court line regardless of input
+    # Standardize court line (always)
     hdr["Court"] = "Mayflower District Court, District for the County of Clark"
 
-    # Extra-safe Case Title: bound between Case Title and next key if it ran on
-    if hdr["Case Title"] == "MISSING DATA" or len(hdr["Case Title"]) > 160:
+    # If Case Title ran long or is empty, try to bound between keys within the header slice
+    if not hdr["Case Title"] or len(hdr["Case Title"]) > 160:
+        header_block = "\n".join(lines)
         m2 = re.search(
-            r"case\s*title\s*:\s*(.+?)\s+(?:docket|decision\s*date|court|judge|disposition|keywords|summary)\s*:",
-            text, re.I | re.S
+            r"case\s*title\s*:\s*(.+?)\s+(?:docket|decision\s*date|court|judge|disposition|keywords|summary|reporter\s*override|slip\s*override)\s*:",
+            header_block, re.I | re.S
         )
         if m2:
             hdr["Case Title"] = re.sub(r"\s+", " ", m2.group(1)).strip()
 
     return hdr
-
 
 # ---------- pdf reading / blocks ----------
 def read_pdf_pages(pdf: Path):
@@ -118,7 +113,7 @@ def build_html_with_page_markers(pages_text, start_page_num):
         else:
             first_html = f'<p class="has-pg"><sup class="pg" id="pg-{pg}">{pg}</sup>' \
                          f'<a class="pg-right" href="#pg-{pg}">{pg}</a>' \
-                         f'<a class="pg-left" href="#pg-{pg}">{pg}</a> {esc(first)}</p>'
+                         f'<a class="pg-left"  href="#pg-{pg}">{pg}</a> {esc(first)}</p>'
             out.append(first_html)
             for b in blocks[1:]:
                 out.append(f"<p>{esc(b)}</p>")
@@ -134,20 +129,30 @@ def slugify(s: str, max_len: int = 80):
         s = s[:max_len].rstrip("-")
     return s or "case"
 
-# ---------- date parsing ----------
+# ---------- date parsing / year derivation ----------
 def parse_decision_date(s: str):
+    """Return (iso_date or None, human_date with suffix)."""
     s = uclean(s)
     months = {m:i for i,m in enumerate(
         ["January","February","March","April","May","June","July","August","September","October","November","December"], 1)}
     m = re.search(r"([A-Za-z]+)\s+(\d{1,2})(?:st|nd|rd|th)?[, ]+(\d{4})", s or "")
     if not m:
-        return None, "MISSING DATA"
+        return None, ""
     mon_name, day, year = m.group(1), int(m.group(2)), int(m.group(3))
     mon = months.get(mon_name, 1)
     iso = f"{year:04d}-{mon:02d}-{day:02d}"
     suf = "th" if 11<=day<=13 else {1:"st",2:"nd",3:"rd"}.get(day%10,"th")
     human = f"{mon_name} {day}{suf} {year}"
     return iso, human
+
+def derive_year(date_iso: str, date_h: str, docket: str):
+    if date_iso:
+        return date_iso[:4]
+    m = re.search(r"\b(20\d{2})\b", date_h or "")
+    if m: return m.group(1)
+    m = re.search(r"\b(20\d{2})\b", docket or "")
+    if m: return m.group(1)
+    return "Unknown"
 
 # ---------- write a case ----------
 def write_case(pdf: Path, vol_state):
@@ -156,18 +161,21 @@ def write_case(pdf: Path, vol_state):
         return None
 
     hdr = parse_header_from_text(pages_text[0])
-    # safe, bounded title with fallback to filename
+
+    # Title (always sane)
     default_title = pdf.stem.replace("_"," ").title()
-    title = hdr.get("Case Title") if hdr.get("Case Title") not in (None, "MISSING DATA", "") else default_title
+    title = (hdr.get("Case Title") or default_title)
     title = re.sub(r"\s+", " ", title).strip()
     if len(title) > 160:
         title = title[:160].rstrip()
 
-    docket = hdr.get("Docket","MISSING DATA")
-    date_iso, date_h = parse_decision_date(hdr.get("Decision Date"))
-    court  = hdr.get("Court")
-    judge  = hdr.get("Judge","MISSING DATA")
-    disp   = hdr.get("Disposition","MISSING DATA")
+    docket = (hdr.get("Docket") or "")
+    date_iso, date_h = parse_decision_date(hdr.get("Decision Date") or "")
+    year = derive_year(date_iso, date_h, docket)
+
+    court  = "Mayflower District Court, District for the County of Clark"
+    judge  = (hdr.get("Judge") or "").strip()
+    disp   = (hdr.get("Disposition") or "").strip()
 
     pages  = max(1, len(pages_text))
 
@@ -180,8 +188,20 @@ def write_case(pdf: Path, vol_state):
     p1   = p0 + pages - 1
     vol_state["next_page"] = p1 + 1
 
-    reporter_cite = f"{title}, {vol} M.2d {p0} ({date_h})"
-    slip_cite     = f"{title}, No. {docket} (Mayflower Dist. Ct. {date_h})"
+    # Cites (support optional overrides)
+    rep_override  = (hdr.get("Reporter Override") or "").strip()
+    slip_override = (hdr.get("Slip Override") or "").strip()
+
+    if rep_override:
+        reporter_cite = rep_override
+    else:
+        reporter_cite = f"{title}, {vol} M.2d {p0} ({year})"
+
+    if slip_override:
+        slip_cite = slip_override
+    else:
+        slip_when = date_h if date_h else (year if year != "Unknown" else "")
+        slip_cite = f"{title}, No. {docket or 'Unknown'} (Mayflower Dist. Ct. {slip_when})".rstrip()
 
     slug = slugify(title, max_len=80)
     outdir = CASES / f"{vol}" / f"{p0}-{slug}"
@@ -189,6 +209,7 @@ def write_case(pdf: Path, vol_state):
 
     opinion_html = build_html_with_page_markers(pages_text, start_page_num=p0)
 
+    # YAML front matter: include ISO 'date:' only if available
     fm = f"""---
 layout: case
 title: "{title}"
