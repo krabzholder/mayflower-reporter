@@ -20,39 +20,29 @@ body.dark{ background:#0c0f14; color:#e5e7eb; --paper:#11151b; --border:#232b35;
 .case-header .disp{ margin-top:.35rem; font-style:italic; }
 .opinion p{ line-height:1.72; margin: 1rem 0; }
 
-.page-break{ position: relative; }
-.page-marker{
-  /* Scholar-style tiny inline page numbers; show left & right badges on wide screens */
-.opinion sup.pg {
+/* === Scholar-style page markers ===
+   Tiny inline superscript at the page boundary +
+   left & right margin badges on wide screens. */
+.opinion sup.pg{
   vertical-align: super;
   font-size: .75em;
   color: var(--muted);
   text-decoration: none;
   padding-left: .15rem;
 }
-.opinion p.has-pg { position: relative; }
-
-/* Right-margin badge */
-.opinion p.has-pg .pg-right {
-  position: absolute; right: -2.8rem; top: .1rem;
-  font-size: .85rem; color: var(--muted);
-  border: 1px solid var(--border); background: var(--paper);
-  padding: 0 .35rem; border-radius: 6px; text-decoration: none;
+.opinion p.has-pg{ position: relative; }
+.opinion p.has-pg .pg-right,
+.opinion p.has-pg .pg-left{
+  position:absolute; top:.1rem;
+  font-size:.85rem; color:var(--muted);
+  border:1px solid var(--border); background:var(--paper);
+  padding:0 .35rem; border-radius:6px; text-decoration:none;
 }
+.opinion p.has-pg .pg-right{ right:-2.8rem; }
+.opinion p.has-pg .pg-left{  left:-2.8rem;  }
 
-/* Left-margin badge */
-.opinion p.has-pg .pg-left {
-  position: absolute; left: -2.8rem; top: .1rem;
-  font-size: .85rem; color: var(--muted);
-  border: 1px solid var(--border); background: var(--paper);
-  padding: 0 .35rem; border-radius: 6px; text-decoration: none;
-}
-
-/* Collapse badges to inline on narrow screens */
-@media (max-width: 980px){
+/* On narrow screens, show ONLY the inline superscript to avoid "22" duplication */
+@media (max-width:980px){
   .opinion p.has-pg .pg-right,
-  .opinion p.has-pg .pg-left { position: static; margin-left:.35rem; }
+  .opinion p.has-pg .pg-left{ display:none; }
 }
-
-}
-@media (max-width:980px){ .page-marker{ position: static; display:inline-block; margin-left:.4rem; } }

@@ -24,6 +24,7 @@ def uclean(s: str) -> str:
     return s
 
 def parse_header_from_text(text: str):
+    """Flexible, case-insensitive header parser that tolerates OCR spacing."""
     text = uclean(text)
     lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
     hdr = {}
@@ -37,7 +38,7 @@ def parse_header_from_text(text: str):
         "Keywords":      re.compile(r"^keywords\s*:\s*(.+)$", re.I),
         "Summary":       re.compile(r"^summary\s*:\s*(.+)$", re.I),
     }
-    search_lines = lines[:80]
+    search_lines = lines[:100]  # search deeper to be safe
     for key, rx in patterns.items():
         val = "MISSING DATA"
         for ln in search_lines:
@@ -46,14 +47,26 @@ def parse_header_from_text(text: str):
                 val = m.group(1).strip()
                 break
         hdr[key] = val
-    # Standardize court line
+
+    # If Decision Date still missing, scan whole first-page text
+    if hdr["Decision Date"] == "MISSING DATA":
+        m = re.search(r"decision\s*date\s*:\s*([^\n]+)", text, re.I)
+        if m: hdr["Decision Date"] = m.group(1).strip()
+
+    # Standardize court line regardless of input
     hdr["Court"] = "Mayflower District Court, District for the County of Clark"
-    # Extra-safe case title extraction: bound it between Case Title and the next header key
+
+    # Extra-safe Case Title: bound between Case Title and next key if it ran on
     if hdr["Case Title"] == "MISSING DATA" or len(hdr["Case Title"]) > 160:
-        m2 = re.search(r"case\s*title\s*:\s*(.+?)\s+(?:docket\s*:|decision\s*date\s*:|court\s*:|judge\s*:)", text, re.I | re.S)
+        m2 = re.search(
+            r"case\s*title\s*:\s*(.+?)\s+(?:docket|decision\s*date|court|judge|disposition|keywords|summary)\s*:",
+            text, re.I | re.S
+        )
         if m2:
             hdr["Case Title"] = re.sub(r"\s+", " ", m2.group(1)).strip()
+
     return hdr
+
 
 # ---------- pdf reading / blocks ----------
 def read_pdf_pages(pdf: Path):
