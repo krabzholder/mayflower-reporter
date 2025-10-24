@@ -14,13 +14,11 @@ if not VOL_FILE.exists():
     VOL_FILE.write_text(json.dumps({"current_volume": 1, "next_page": 1, "max_pages_per_volume": 800}, indent=2))
 vol_state = json.loads(VOL_FILE.read_text())
 
-# Canonical header keys we support (order doesn't matter)
+# Canonical keys + alias mapping (case/spacing tolerant)
 CANONICAL_KEYS = [
     "Case Title", "Docket", "Decision Date", "Court", "Judge",
     "Disposition", "Keywords", "Summary", "Reporter Override", "Slip Override"
 ]
-
-# Aliases → Canonical mapping (case-insensitive, spaces/dots ignored)
 ALIASES = {
     "title": "Case Title",
     "case title": "Case Title",
@@ -48,51 +46,52 @@ def uclean(s: str) -> str:
     return s
 
 def norm_key(k: str) -> str:
-    """lowercase & collapse spaces/punctuation to match aliases robustly"""
     k = uclean(k).lower()
     k = re.sub(r"[^a-z]+", " ", k).strip()
     return k
 
 def split_header_body(first_page_text: str):
     """
-    Detect a header at the very top as a contiguous run of lines matching 'Key: value'.
-    Stop at the first line that doesn't match that shape.
-    Return (header_lines:list[str], body_text:str).
+    Recognize a header at the very top as a contiguous run of lines that
+    look like they contain at least one 'Key: value' pair. Stop at the first
+    line that doesn't contain a pair.
     """
     lines = first_page_text.splitlines()
     header_lines = []
     i = 0
-    # allow a couple of blank lines at the very top
     while i < len(lines) and not lines[i].strip():
         i += 1
-    while i < len(lines) and len(header_lines) < 40:  # hard cap
+    while i < len(lines) and len(header_lines) < 60:
         ln = lines[i].strip()
-        m = re.match(r"^([A-Za-z .]+)\s*:\s*(.*)$", ln)
-        if not m:
+        if re.search(r"[A-Za-z][A-Za-z .]+\s*:", ln):
+            header_lines.append(ln)
+            i += 1
+        else:
             break
-        header_lines.append(ln)
-        i += 1
     body_text = "\n".join(lines[i:]) if i < len(lines) else ""
     return header_lines, body_text
 
 def parse_header_from_lines(header_lines):
-    """Parse the Key: Value lines, case/alias tolerant; enforce standard court line."""
+    """
+    Parse EVERY 'Key: value' pair even if several are on the same line.
+    We scan the joined header block with a regex that stops each value
+    at the next 'Key:' or end of string.
+    """
     hdr = {k: "" for k in CANONICAL_KEYS}
-    for ln in header_lines:
-        m = re.match(r"^([A-Za-z .]+)\s*:\s*(.*)$", ln)
-        if not m:
-            continue
+    block = uclean("\n".join(header_lines))
+
+    # key: value; value ends right before the next 'Key:' (non-greedy)
+    pair_rx = re.compile(r"([A-Za-z .]+?)\s*:\s*(.*?)(?=(?:\n| )+[A-Za-z][A-Za-z .]+?\s*:|\Z)", re.S)
+    for m in pair_rx.finditer(block):
         raw_key = m.group(1).strip()
         val = m.group(2).strip()
-        # trim inline comments like "  # guidance"
         if " #" in val:
             val = val.split(" #", 1)[0].rstrip()
-        k_norm = norm_key(raw_key)
-        canon = ALIASES.get(k_norm)
+        canon = ALIASES.get(norm_key(raw_key))
         if canon:
             hdr[canon] = uclean(val)
 
-    # Always your fixed court line
+    # Always your standardized court line
     hdr["Court"] = "Mayflower District Court, District for the County of Clark"
     return hdr
 
@@ -118,7 +117,6 @@ def build_html_with_page_markers(pages_text, start_page_num, first_page_body_ove
     if not pages_text:
         return ""
 
-    # page 1 body (strip header portion)
     first_body = first_page_body_override if first_page_body_override is not None else pages_text[0]
     for b in normalize_blocks(first_body):
         out.append(f"<p>{esc(b)}</p>")
@@ -184,7 +182,7 @@ def derive_year(date_iso: str, date_h: str, docket: str, title: str):
     m = re.search(r"\b(20\d{2})\b", date_h or "")
     if m:
         return m.group(1)
-    m = re.search(r"-([0-9]{2})\b", docket or "")  # e.g., CR-168-25 → 2025
+    m = re.search(r"-([0-9]{2})\b", docket or "")
     if m:
         return f"20{m.group(1)}"
     m = re.search(r"\b(20\d{2})\b", title or "")
