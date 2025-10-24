@@ -14,44 +14,38 @@ if not VOL_FILE.exists():
     VOL_FILE.write_text(json.dumps({"current_volume": 1, "next_page": 1, "max_pages_per_volume": 800}, indent=2))
 vol_state = json.loads(VOL_FILE.read_text())
 
-CANONICAL_KEYS = [
-    "Case Title", "Docket", "Decision Date", "Court", "Judge",
-    "Disposition", "Keywords", "Summary", "Reporter Override", "Slip Override"
-]
-ALIASES = {
-    "title": "Case Title", "case title": "Case Title", "case": "Case Title",
-    "docket": "Docket",
-    "decision date": "Decision Date", "date": "Decision Date", "decided": "Decision Date",
-    "court": "Court",
-    "judge": "Judge",
-    "disposition": "Disposition", "outcome": "Disposition",
-    "keywords": "Keywords", "tags": "Keywords",
-    "summary": "Summary",
-    "reporter override": "Reporter Override",
-    "slip override": "Slip Override",
-}
+PAGE_CHAR_BUDGET = 1800  # heuristic for web pagination; tune per your taste
 
-def uclean(s: str) -> str:
-    s = unicodedata.normalize("NFKC", s or "")
-    s = s.replace("：", ":").replace("\u00a0", " ")
-    s = re.sub(r"[ \t]+", " ", s)
-    return s
+def normalize(s: str) -> str:
+    return unicodedata.normalize("NFKC", s or "").strip()
 
-def norm_key(k: str) -> str:
-    k = uclean(k).lower()
-    k = re.sub(r"[^a-z]+", " ", k).strip()
-    return k
+def read_pdf_text(pdf_path: Path) -> str:
+    reader = PdfReader(str(pdf_path))
+    parts = []
+    for page in reader.pages:
+        try:
+            parts.append(page.extract_text() or "")
+        except Exception:
+            parts.append("")
+    return "\n".join(parts)
 
-def split_header_body(first_page_text: str):
-    lines = first_page_text.splitlines()
+def split_header_body(full_text: str):
+    """Split at first blank line after a run of 'Field: value' lines."""
+    lines = [normalize(l) for l in full_text.splitlines()]
     header_lines = []
     i = 0
-    while i < len(lines) and not lines[i].strip():
-        i += 1
     while i < len(lines) and len(header_lines) < 60:
-        ln = lines[i].strip()
-        # consider this a header line if it contains any "<letters>:"
-        if re.search(r"[A-Za-z][A-Za-z .]+\s*:", ln):
+        ln = lines[i]
+        if not ln:
+            # stop header when we hit an empty line AFTER at least 1 header line
+            if header_lines:
+                i += 1
+                break
+            else:
+                i += 1
+                continue
+        # header if it looks like "Word(s): value"
+        if re.search(r"^[A-Za-z][A-Za-z .]*\s*:", ln):
             header_lines.append(ln)
             i += 1
         else:
@@ -59,219 +53,167 @@ def split_header_body(first_page_text: str):
     body_text = "\n".join(lines[i:]) if i < len(lines) else ""
     return header_lines, body_text
 
-def parse_header_from_lines(header_lines):
-    hdr = {k: "" for k in CANONICAL_KEYS}
-    block = uclean("\n".join(header_lines))
-    # find EVERY Key: value pair, even multiple on one line
-    pair_rx = re.compile(r"([A-Za-z .]+?)\s*:\s*(.*?)(?=(?:\n| )+[A-Za-z][A-Za-z .]+?\s*:|\Z)", re.S)
-    for m in pair_rx.finditer(block):
-        raw_key = m.group(1).strip()
-        val = m.group(2).strip()
-        if " #" in val:
-            val = val.split(" #", 1)[0].rstrip()
-        canon = ALIASES.get(norm_key(raw_key))
-        if canon:
-            hdr[canon] = uclean(val)
-    # always standardize the court line
-    hdr["Court"] = "Mayflower District Court, District for the County of Clark"
-    return hdr
-
-def read_pdf_pages(pdf: Path):
-    reader = PdfReader(str(pdf))
-    return [p.extract_text() or "" for p in reader.pages]
-
-def normalize_blocks(raw: str):
-    raw = raw.replace("\r\n", "\n").replace("\r", "\n")
-    chunks = re.split(r"\n{2,}", raw)
-    blocks = []
-    for c in chunks:
-        c = c.strip()
-        if not c:
+def parse_header(header_lines):
+    M = {}
+    for ln in header_lines:
+        m = re.match(r"^([A-Za-z][A-Za-z .]*?)\s*:\s*(.*)$", ln)
+        if not m: 
             continue
-        blocks.append(re.sub(r"[ \t]*\n[ \t]*", " ", c))
-    return blocks
+        k, v = m.group(1).strip(), m.group(2).strip()
+        key = k.lower().replace(" ", "_")
+        M[key] = v
+    # canonical keys
+    return {
+        "case_title": M.get("case_title") or M.get("title") or "",
+        "docket": M.get("docket") or "",
+        "decision_date": M.get("decision_date") or "",
+        "court": M.get("court") or "",
+        "judge": M.get("judge") or "",
+        "disposition": M.get("disposition") or "",
+        "keywords": [w.strip() for w in (M.get("keywords") or "").split(",") if w.strip()],
+        "reporter_override": M.get("reporter_override") or "",
+        "slip_override": M.get("slip_override") or "",
+    }
 
-def infer_judge_from_body(first_body: str) -> str:
-    """
-    Fallback: capture the judge from the caption line at start of the opinion, e.g.:
-    '... ORDER KRABZATONIN, ASSOCIATE JUSTICE (RET.): On October ...'
-    """
-    if not first_body:
-        return ""
-    text = uclean(first_body)
-    # Look for "... NAME, <something> JUSTICE ... :"
-    m = re.search(r"\b([A-Z][A-Z' .-]{1,60}),\s*([A-Z][A-Z' .()-]{3,60}JUSTICE[ A-Z().'-]{0,20})\s*:", text)
-    if not m:
-        return ""
-    name_up = m.group(1).title()  # Krabzatonin
-    title_up = m.group(2).title() # Associate Justice (Ret.)
-    # Preserve (Ret.) capitalization
-    title_up = re.sub(r"\(Ret\.\)", "(Ret.)", title_up)
-    return f"{name_up}, {title_up}"
+def year_from_date(s: str) -> str:
+    m = re.search(r"(20\d{2}|19\d{2})", s or "")
+    return m.group(1) if m else ""
 
-def build_html_with_page_markers(pages_text, start_page_num, first_page_body_override=None):
-    out = []
-    if not pages_text:
-        return ""
-    first_body = first_page_body_override if first_page_body_override is not None else pages_text[0]
-    for b in normalize_blocks(first_body):
-        out.append(f"<p>{esc(b)}</p>")
-    pg = start_page_num
-    for i in range(1, len(pages_text)):
-        pg += 1
-        blocks = normalize_blocks(pages_text[i])
-        if not blocks:
-            if out and out[-1].startswith("<p>"):
-                out[-1] = out[-1][:-4] + f'<sup class="pg" id="pg-{pg}">{pg}</sup></p>'
-            continue
-        first = blocks[0]
-        looks_cont = bool(re.match(r"^[a-z0-9,.;:)]", first))
-        if looks_cont and out and out[-1].startswith("<p"):
-            last = out.pop()
-            if 'class="' in last.split(">")[0]:
-                last = last.replace('class="', 'class="has-pg ', 1)
-            else:
-                last = last.replace("<p", '<p class="has-pg"', 1)
-            last = last[:-4] + f'<sup class="pg" id="pg-{pg}">{pg}</sup>' \
-                               f'<a class="pg-left" href="#pg-{pg}">{pg}</a> ' \
-                               f'{esc(first)}</p>'
-            out.append(last)
-            for b in blocks[1:]:
-                out.append(f"<p>{esc(b)}</p>")
-        else:
-            first_html = f'<p class="has-pg"><sup class="pg" id="pg-{pg}">{pg}</sup>' \
-                         f'<a class="pg-left" href="#pg-{pg}">{pg}</a> {esc(first)}</p>'
-            out.append(first_html)
-            for b in blocks[1:]:
-                out.append(f"<p>{esc(b)}</p>")
-    return "\n".join(out)
-
-def esc(t: str):
-    return t.replace("&","&amp;").replace("<","&lt;").replace(">","&gt;")
-
-def slugify(s: str, max_len: int = 80):
-    s = s.lower()
+def make_slug(s: str) -> str:
+    s = normalize(s).lower()
     s = re.sub(r"[^a-z0-9]+", "-", s).strip("-")
-    if len(s) > max_len:
-        s = s[:max_len].rstrip("-")
     return s or "case"
 
-def parse_decision_date(s: str):
-    s = uclean(s)
-    months = {m:i for i,m in enumerate(
-        ["January","February","March","April","May","June","July","August","September","October","November","December"], 1)}
-    m = re.search(r"([A-Za-z]+)\s+(\d{1,2})(?:st|nd|rd|th)?[, ]+(\d{4})", s or "")
-    if not m:
-        return None, ""
-    mon_name, day, year = m.group(1), int(m.group(2)), int(m.group(3))
-    mon = months.get(mon_name, 1)
-    iso = f"{year:04d}-{mon:02d}-{day:02d}"
-    suf = "th" if 11<=day<=13 else {1:"st",2:"nd",3:"rd"}.get(day%10,"th")
-    return iso, f"{mon_name} {day}{suf} {year}"
-
-def derive_year(date_iso: str, date_h: str, docket: str, title: str):
-    if date_iso:
-        return date_iso[:4]
-    m = re.search(r"\b(20\d{2})\b", date_h or "")
-    if m:
-        return m.group(1)
-    m = re.search(r"-([0-9]{2})\b", docket or "")
-    if m:
-        return f"20{m.group(1)}"
-    m = re.search(r"\b(20\d{2})\b", title or "")
-    if m:
-        return m.group(1)
-    return "Unknown"
-
-def write_case(pdf: Path, vol_state):
-    pages_text = read_pdf_pages(pdf)
-    if not pages_text:
-        return None
-    header_lines, first_body = split_header_body(pages_text[0])
-    hdr = parse_header_from_lines(header_lines)
-
-    title = re.sub(r"\s+", " ", (hdr.get("Case Title") or pdf.stem.replace("_"," ").title())).strip()
-    if len(title) > 160:
-        title = title[:160].rstrip()
-
-    docket = hdr.get("Docket") or ""
-    date_iso, date_h = parse_decision_date(hdr.get("Decision Date") or "")
-    year = derive_year(date_iso, date_h, docket, title)
-
-    judge = (hdr.get("Judge") or "").strip()
-    if not judge:
-        judge = infer_judge_from_body(first_body)
-
-    disp  = (hdr.get("Disposition") or "").strip()
-
-    pages = max(1, len(pages_text))
-    if vol_state["next_page"] + pages - 1 > vol_state["max_pages_per_volume"]:
+def ensure_volume(vol_state):
+    if vol_state["next_page"] > vol_state["max_pages_per_volume"]:
         vol_state["current_volume"] += 1
         vol_state["next_page"] = 1
 
-    vol = vol_state["current_volume"]
-    p0  = vol_state["next_page"]
-    p1  = p0 + pages - 1
-    vol_state["next_page"] = p1 + 1
+def reserve_pages(vol_state, body_text: str):
+    """Estimate how many web pages the opinion will occupy; return start,end."""
+    text = body_text.strip()
+    n_pages = max(1, (len(text) + PAGE_CHAR_BUDGET - 1) // PAGE_CHAR_BUDGET)
+    ensure_volume(vol_state)
+    start = vol_state["next_page"]
+    end = start + n_pages - 1
+    vol_state["next_page"] = end + 1
+    return start, end
 
-    rep_override  = (hdr.get("Reporter Override") or "").strip()
-    slip_override = (hdr.get("Slip Override") or "").strip()
-    reporter_cite = rep_override or f"{title}, {vol} M.2d {p0} ({year})"
-    slip_cite     = slip_override or f"{title}, No. {docket or 'Unknown'} (Mayflower Dist. Ct. {date_h or year})"
+def inject_page_markers(volume: int, page_start: int, body_text: str) -> str:
+    """Insert <hr class='page-marker' data-cite='1 M.2d 27'> inside the body only."""
+    # We'll break by character budget and inject before the boundary paragraph.
+    chunks = []
+    remaining = body_text
+    current_page = page_start
+    idx = 0
+    while remaining:
+        take = remaining[:PAGE_CHAR_BUDGET]
+        rest = remaining[PAGE_CHAR_BUDGET:]
+        if idx == 0:
+            # first chunk: start of body (no marker yet; page_start is implied)
+            chunks.append(take)
+        else:
+            cite = f"{volume} M.2d {page_start + idx}"
+            marker = f"\n\n<hr class=\"page-marker\" data-cite=\"{cite}\">\n\n"
+            chunks.append(marker + take)
+        remaining = rest
+        idx += 1
+    return "".join(chunks)
 
-    slug = slugify(title, 80)
-    outdir = CASES / f"{vol}" / f"{p0}-{slug}"
-    outdir.mkdir(parents=True, exist_ok=True)
+def render_markdown_html(txt: str) -> str:
+    """Very light Markdown to HTML for paragraphs; Jekyll will run kramdown anyway,
+    but we keep it plaintext-friendly. We only wrap paragraphs here."""
+    paras = [p.strip() for p in re.split(r"\n\s*\n", txt.strip()) if p.strip()]
+    return "\n\n".join([f"<p>{p}</p>" for p in paras])
 
-    opinion_html = build_html_with_page_markers(pages_text, start_page_num=p0, first_page_body_override=first_body)
+def write_case(pdf: Path, vol_state):
+    full_text = read_pdf_text(pdf)
+    header_lines, body_text = split_header_body(full_text)
+    H = parse_header(header_lines)
 
-    fm = f"""---
-layout: case
-title: "{title}"
-reporter_cite: "{reporter_cite}"
-slip_cite: "{slip_cite}"
-court: "Mayflower District Court, District for the County of Clark"
-judge: "{judge}"
-docket: "{docket}"
-decision_date: "{date_h}"
-volume: {vol}
-page_start: {p0}
-page_end: {p1}
-disposition: "{disp}"
-pdf_source: "{pdf.as_posix()}"
-"""
-    if date_iso:
-        fm += f"date: {date_iso}\n"
-    fm += "---\n"
+    # Required titles
+    case_title = normalize(H["case_title"]) or pdf.stem
+    docket = normalize(H["docket"])
+    decision_date = normalize(H["decision_date"])
+    decision_year = year_from_date(decision_date)
+    court = normalize(H["court"])
+    judge = normalize(H["judge"])
+    disposition = normalize(H["disposition"])
+    keywords = H["keywords"]
 
-    content = fm + f"""
-<header class="case-header">
-  <div class="cite"><strong>{reporter_cite}</strong></div>
-  <div class="slip">Slip: {slip_cite}</div>
-  <div class="meta"><span>Mayflower District Court, District for the County of Clark</span> · <span>Judge {judge}</span></div>
-  <div class="disp"><em>{disp}</em></div>
-  <div class="slip">Cite as: <code>{vol} M.2d {p0}</code></div>
-</header>
+    # Volume/Page reservation
+    volume = vol_state["current_volume"]
+    page_start, page_end = reserve_pages(vol_state, body_text)
+    reporter_cite = H["reporter_override"].strip() or f"{volume} M.2d {page_start}"
+    slipline = H["slip_override"].strip() or f"{case_title}, No. {docket} ({court}. {decision_date})"
 
-<main class="opinion">
-{opinion_html}
-</main>
-"""
-    (outdir / "index.md").write_text(content, encoding="utf-8")
+    # Paths & slugs (both docket and reporter)
+    docket_slug = make_slug(docket)
+    title_slug = make_slug(case_title)
+    path_slug = f"{page_start}-{title_slug}"
+    out_dir = CASES / str(volume) / path_slug
+    out_dir.mkdir(parents=True, exist_ok=True)
 
-    return {"title": title, "reporter_cite": reporter_cite, "slip_cite": slip_cite,
-            "volume": vol, "page_start": p0, "page_end": p1, "judge": judge,
-            "docket": docket, "date_iso": date_iso, "decision_date": date_h,
-            "path": f"cases/{vol}/{p0}-{slug}/"}
+    # Inject page markers inside the opinion body only
+    body_with_markers = inject_page_markers(volume, page_start, body_text)
+    body_html = render_markdown_html(body_with_markers)
+
+    # Prev/Next (best-effort: link by page +/- 1 within same volume)
+    prev_path = f"/cases/{volume}/{page_start-1}/" if page_start > 1 else ""
+    next_path = f"/cases/{volume}/{page_end+1}/"
+
+    # Write case file
+    fm = {
+      "layout": "case",
+      "title": case_title,
+      "case_title": case_title,
+      "reporter_cite": reporter_cite,
+      "decision_year": decision_year,
+      "decision_date": decision_date,
+      "court": court,
+      "judge": judge,
+      "disposition": disposition,
+      "keywords": keywords,
+      "volume": volume,
+      "page_start": page_start,
+      "page_end": page_end,
+      "docket": docket,
+      "slug": title_slug,
+      "docket_slug": docket_slug,
+      "pdf_path": str(pdf.relative_to(ROOT)).replace("\\", "/"),
+      "slipline": slipline,
+      "prev_path": prev_path,
+      "next_path": next_path,
+    }
+
+    md = "---\n" + "\n".join([f"{k}: {json.dumps(v, ensure_ascii=False)}" for k,v in fm.items()]) + "\n---\n\n" + body_html + "\n"
+    (out_dir / "index.md").write_text(md, encoding="utf-8")
+
+    item = {
+      "title": case_title,
+      "reporter_cite": reporter_cite,
+      "volume": volume,
+      "page_start": page_start,
+      "page_end": page_end,
+      "judge": judge,
+      "docket": docket,
+      "court": court,
+      "year": decision_year,
+      "keywords": keywords,
+      "path": f"/cases/{volume}/{path_slug}/"
+    }
+    return item
 
 def main():
     items = []
-    for pdf in sorted(RULINGS.glob("**/*.pdf")):
+    for pdf in sorted(RULINGS.glob("*.pdf")):
         item = write_case(pdf, vol_state)
         if item:
             items.append(item)
-    VOL_FILE.write_text(json.dumps(vol_state, indent=2))
+
+    VOL_FILE.write_text(json.dumps(vol_state, indent=2), encoding="utf-8")
     (DATA / "search.json").write_text(json.dumps(items, indent=2), encoding="utf-8")
+
     rows = sorted(items, key=lambda x:(x["volume"], x["page_start"]))
     table = "\n".join([f"- [{r['reporter_cite']}]({r['path']}) — {r.get('judge','')}" for r in rows])
     (ROOT / "citator.md").write_text(

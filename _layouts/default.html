@@ -1,38 +1,42 @@
 <!doctype html>
 <html lang="en">
 <head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>{{ page.title }} | {{ site.title }}</title>
-  <link rel="stylesheet" href="{{ '/assets/css/reporter.css' | relative_url }}">
-  <meta name="color-scheme" content="light dark">
+  <meta charset="utf-8" />
+  <meta
+    name="viewport"
+    content="width=device-width, initial-scale=1, viewport-fit=cover"
+/>
+  <title>
+    {% if page.title %}{{ page.title }} · {% endif %}{{ site.title }}
+  </title>
+
+  <meta name="description" content="{{ site.description | default: '' }}">
+  <link rel="stylesheet" href="{{ '/assets/css/style.css' | relative_url }}">
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
 </head>
-<body class="light">
-  <header class="site">
-    <a class="brand" href="{{ '/' | relative_url }}">{{ site.title }}</a>
-    <nav class="nav">
-      <a href="{{ '/' | relative_url }}">Home</a>
-      <a href="{{ '/citator' | relative_url }}">Citator</a>
-    </nav>
-    <button id="themeToggle" aria-label="Toggle dark mode">🌓</button>
+<body>
+  <header class="site-header">
+    <div class="site-header__inner">
+      <a class="brand" href="{{ '/' | relative_url }}">
+        {{ site.title }}
+      </a>
+      <nav class="nav">
+        <a href="{{ '/' | relative_url }}">Home</a>
+        <a href="{{ '/citator' | relative_url }}">Citator</a>
+      </nav>
+    </div>
   </header>
 
-  <main class="container">{{ content }}</main>
+  <main class="site-main">
+    {{ content }}
+  </main>
 
-  <!-- expose the site base path for JS to consume -->
-  <script>window.__base="{{ '/' | relative_url }}";</script>
-  <script src="{{ '/assets/js/search.js' | relative_url }}" defer></script>
-  <script>
-  (function(){
-    const key='theme'; const btn=document.getElementById('themeToggle');
-    const pref=localStorage.getItem(key)||'light';
-    document.body.classList.remove('light','dark'); document.body.classList.add(pref);
-    btn?.addEventListener('click',()=>{
-      const next=document.body.classList.contains('light')?'dark':'light';
-      document.body.classList.remove('light','dark'); document.body.classList.add(next);
-      localStorage.setItem(key,next);
-    });
-  })();
-  </script>
+  <footer class="site-footer">
+    <div class="site-footer__inner">
+      <span>&copy; {{ "now" | date: "%Y" }} {{ site.title }}</span>
+    </div>
+  </footer>
 </body>
 </html>
