@@ -14,31 +14,23 @@ if not VOL_FILE.exists():
     VOL_FILE.write_text(json.dumps({"current_volume": 1, "next_page": 1, "max_pages_per_volume": 800}, indent=2))
 vol_state = json.loads(VOL_FILE.read_text())
 
-# Canonical keys + alias mapping (case/spacing tolerant)
 CANONICAL_KEYS = [
     "Case Title", "Docket", "Decision Date", "Court", "Judge",
     "Disposition", "Keywords", "Summary", "Reporter Override", "Slip Override"
 ]
 ALIASES = {
-    "title": "Case Title",
-    "case title": "Case Title",
-    "case": "Case Title",
+    "title": "Case Title", "case title": "Case Title", "case": "Case Title",
     "docket": "Docket",
-    "decision date": "Decision Date",
-    "date": "Decision Date",
-    "decided": "Decision Date",
+    "decision date": "Decision Date", "date": "Decision Date", "decided": "Decision Date",
     "court": "Court",
     "judge": "Judge",
-    "disposition": "Disposition",
-    "outcome": "Disposition",
-    "keywords": "Keywords",
-    "tags": "Keywords",
+    "disposition": "Disposition", "outcome": "Disposition",
+    "keywords": "Keywords", "tags": "Keywords",
     "summary": "Summary",
     "reporter override": "Reporter Override",
     "slip override": "Slip Override",
 }
 
-# -------------------- Helpers --------------------
 def uclean(s: str) -> str:
     s = unicodedata.normalize("NFKC", s or "")
     s = s.replace("：", ":").replace("\u00a0", " ")
@@ -51,11 +43,6 @@ def norm_key(k: str) -> str:
     return k
 
 def split_header_body(first_page_text: str):
-    """
-    Recognize a header at the very top as a contiguous run of lines that
-    look like they contain at least one 'Key: value' pair. Stop at the first
-    line that doesn't contain a pair.
-    """
     lines = first_page_text.splitlines()
     header_lines = []
     i = 0
@@ -63,6 +50,7 @@ def split_header_body(first_page_text: str):
         i += 1
     while i < len(lines) and len(header_lines) < 60:
         ln = lines[i].strip()
+        # consider this a header line if it contains any "<letters>:"
         if re.search(r"[A-Za-z][A-Za-z .]+\s*:", ln):
             header_lines.append(ln)
             i += 1
@@ -72,15 +60,9 @@ def split_header_body(first_page_text: str):
     return header_lines, body_text
 
 def parse_header_from_lines(header_lines):
-    """
-    Parse EVERY 'Key: value' pair even if several are on the same line.
-    We scan the joined header block with a regex that stops each value
-    at the next 'Key:' or end of string.
-    """
     hdr = {k: "" for k in CANONICAL_KEYS}
     block = uclean("\n".join(header_lines))
-
-    # key: value; value ends right before the next 'Key:' (non-greedy)
+    # find EVERY Key: value pair, even multiple on one line
     pair_rx = re.compile(r"([A-Za-z .]+?)\s*:\s*(.*?)(?=(?:\n| )+[A-Za-z][A-Za-z .]+?\s*:|\Z)", re.S)
     for m in pair_rx.finditer(block):
         raw_key = m.group(1).strip()
@@ -90,8 +72,7 @@ def parse_header_from_lines(header_lines):
         canon = ALIASES.get(norm_key(raw_key))
         if canon:
             hdr[canon] = uclean(val)
-
-    # Always your standardized court line
+    # always standardize the court line
     hdr["Court"] = "Mayflower District Court, District for the County of Clark"
     return hdr
 
@@ -100,7 +81,6 @@ def read_pdf_pages(pdf: Path):
     return [p.extract_text() or "" for p in reader.pages]
 
 def normalize_blocks(raw: str):
-    """Do NOT create new paragraphs unless there's an actual blank line."""
     raw = raw.replace("\r\n", "\n").replace("\r", "\n")
     chunks = re.split(r"\n{2,}", raw)
     blocks = []
@@ -111,16 +91,31 @@ def normalize_blocks(raw: str):
         blocks.append(re.sub(r"[ \t]*\n[ \t]*", " ", c))
     return blocks
 
-# -------------------- Page markers (Scholar style; left only) --------------------
+def infer_judge_from_body(first_body: str) -> str:
+    """
+    Fallback: capture the judge from the caption line at start of the opinion, e.g.:
+    '... ORDER KRABZATONIN, ASSOCIATE JUSTICE (RET.): On October ...'
+    """
+    if not first_body:
+        return ""
+    text = uclean(first_body)
+    # Look for "... NAME, <something> JUSTICE ... :"
+    m = re.search(r"\b([A-Z][A-Z' .-]{1,60}),\s*([A-Z][A-Z' .()-]{3,60}JUSTICE[ A-Z().'-]{0,20})\s*:", text)
+    if not m:
+        return ""
+    name_up = m.group(1).title()  # Krabzatonin
+    title_up = m.group(2).title() # Associate Justice (Ret.)
+    # Preserve (Ret.) capitalization
+    title_up = re.sub(r"\(Ret\.\)", "(Ret.)", title_up)
+    return f"{name_up}, {title_up}"
+
 def build_html_with_page_markers(pages_text, start_page_num, first_page_body_override=None):
     out = []
     if not pages_text:
         return ""
-
     first_body = first_page_body_override if first_page_body_override is not None else pages_text[0]
     for b in normalize_blocks(first_body):
         out.append(f"<p>{esc(b)}</p>")
-
     pg = start_page_num
     for i in range(1, len(pages_text)):
         pg += 1
@@ -129,7 +124,6 @@ def build_html_with_page_markers(pages_text, start_page_num, first_page_body_ove
             if out and out[-1].startswith("<p>"):
                 out[-1] = out[-1][:-4] + f'<sup class="pg" id="pg-{pg}">{pg}</sup></p>'
             continue
-
         first = blocks[0]
         looks_cont = bool(re.match(r"^[a-z0-9,.;:)]", first))
         if looks_cont and out and out[-1].startswith("<p"):
@@ -162,7 +156,6 @@ def slugify(s: str, max_len: int = 80):
         s = s[:max_len].rstrip("-")
     return s or "case"
 
-# -------------------- Date helpers --------------------
 def parse_decision_date(s: str):
     s = uclean(s)
     months = {m:i for i,m in enumerate(
@@ -190,12 +183,10 @@ def derive_year(date_iso: str, date_h: str, docket: str, title: str):
         return m.group(1)
     return "Unknown"
 
-# -------------------- Write a case --------------------
 def write_case(pdf: Path, vol_state):
     pages_text = read_pdf_pages(pdf)
     if not pages_text:
         return None
-
     header_lines, first_body = split_header_body(pages_text[0])
     hdr = parse_header_from_lines(header_lines)
 
@@ -206,7 +197,11 @@ def write_case(pdf: Path, vol_state):
     docket = hdr.get("Docket") or ""
     date_iso, date_h = parse_decision_date(hdr.get("Decision Date") or "")
     year = derive_year(date_iso, date_h, docket, title)
+
     judge = (hdr.get("Judge") or "").strip()
+    if not judge:
+        judge = infer_judge_from_body(first_body)
+
     disp  = (hdr.get("Disposition") or "").strip()
 
     pages = max(1, len(pages_text))
@@ -269,17 +264,14 @@ pdf_source: "{pdf.as_posix()}"
             "docket": docket, "date_iso": date_iso, "decision_date": date_h,
             "path": f"cases/{vol}/{p0}-{slug}/"}
 
-# -------------------- Build site data --------------------
 def main():
     items = []
     for pdf in sorted(RULINGS.glob("**/*.pdf")):
         item = write_case(pdf, vol_state)
         if item:
             items.append(item)
-
     VOL_FILE.write_text(json.dumps(vol_state, indent=2))
     (DATA / "search.json").write_text(json.dumps(items, indent=2), encoding="utf-8")
-
     rows = sorted(items, key=lambda x:(x["volume"], x["page_start"]))
     table = "\n".join([f"- [{r['reporter_cite']}]({r['path']}) — {r.get('judge','')}" for r in rows])
     (ROOT / "citator.md").write_text(
