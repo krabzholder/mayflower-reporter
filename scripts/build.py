@@ -26,6 +26,7 @@ def parse_header_from_text(text: str):
                 val = lines[i].split(":",1)[1].strip()
                 break
         hdr[key] = val
+    # Enforce your standard court line
     hdr["Court"] = "Mayflower District Court, District for the County of Clark"
     return hdr
 
@@ -39,18 +40,24 @@ def normalize_blocks(raw: str):
     blocks = []
     for c in chunks:
         c = c.strip()
-        if not c: continue
+        if not c: 
+            continue
+        # collapse soft wraps inside a paragraph
         c = re.sub(r"[ \t]*\n[ \t]*", " ", c)
         blocks.append(c)
     return blocks
 
 def build_html_with_page_markers(pages_text, start_page_num):
+    """Render paragraphs and insert right-margin page markers at PDF page boundaries (mid-paragraph when needed)."""
     html_parts = []
-    if not pages_text: return ""
+    if not pages_text: 
+        return ""
+    # page 1
     first_blocks = normalize_blocks(pages_text[0])
     for b in first_blocks:
         html_parts.append(f"<p>{esc(b)}</p>")
     pg = start_page_num
+    # later pages
     for i in range(1, len(pages_text)):
         pg += 1
         blocks = normalize_blocks(pages_text[i])
@@ -60,11 +67,14 @@ def build_html_with_page_markers(pages_text, start_page_num):
         first = blocks[0]
         looks_continuation = bool(re.match(r"^[a-z0-9,.;:)]", first))
         if looks_continuation and html_parts and html_parts[-1].startswith("<p>"):
+            # insert marker inline at end of previous <p>
             html_parts[-1] = html_parts[-1][:-4] + f'<a id="pg-{pg}" class="page-marker" href="#pg-{pg}">{pg}</a>' + "</p>"
+            # continue with the remainder of the paragraph on this page
             html_parts.append(f"<p>{esc(first)}</p>")
             for b in blocks[1:]:
                 html_parts.append(f"<p>{esc(b)}</p>")
         else:
+            # break between paragraphs
             html_parts.append(f'<div class="page-break"><a id="pg-{pg}" class="page-marker" href="#pg-{pg}">{pg}</a></div>')
             for b in blocks:
                 html_parts.append(f"<p>{esc(b)}</p>")
@@ -78,12 +88,19 @@ def slugify(s: str):
     s = re.sub(r"[^a-z0-9]+", "-", s).strip("-")
     return s or "case"
 
-def normalize_date(s: str):
-    m = re.search(r"([A-Za-z]+)\s+(\d{1,2})(?:st|nd|rd|th)?[, ]+\s*(\d{4})", s or "")
-    if not m: return "MISSING DATA"
-    mon, day, year = m.group(1), int(m.group(2)), m.group(3)
+def parse_decision_date(s: str):
+    """Return (iso_date or None, human_date with suffix)."""
+    months = {m:i for i,m in enumerate(
+        ["January","February","March","April","May","June","July","August","September","October","November","December"], 1)}
+    m = re.search(r"([A-Za-z]+)\s+(\d{1,2})(?:st|nd|rd|th)?[, ]+(\d{4})", s or "")
+    if not m:
+        return None, "MISSING DATA"
+    mon_name, day, year = m.group(1), int(m.group(2)), int(m.group(3))
+    mon = months.get(mon_name, 1)
+    iso = f"{year:04d}-{mon:02d}-{day:02d}"
     suf = "th" if 11<=day<=13 else {1:"st",2:"nd",3:"rd"}.get(day%10,"th")
-    return f"{mon} {day}{suf} {year}"
+    human = f"{mon_name} {day}{suf} {year}"
+    return iso, human
 
 def write_case(pdf: Path, vol_state):
     pages_text = read_pdf_pages(pdf)
@@ -92,7 +109,7 @@ def write_case(pdf: Path, vol_state):
     hdr = parse_header_from_text(pages_text[0])
     title  = hdr.get("Case Title") if hdr.get("Case Title") != "MISSING DATA" else pdf.stem.replace("_"," ").title()
     docket = hdr.get("Docket","MISSING DATA")
-    date_h = normalize_date(hdr.get("Decision Date"))
+    date_iso, date_h = parse_decision_date(hdr.get("Decision Date"))
     court  = hdr.get("Court")
     judge  = hdr.get("Judge","MISSING DATA")
     disp   = hdr.get("Disposition","MISSING DATA")
@@ -117,6 +134,7 @@ def write_case(pdf: Path, vol_state):
 
     opinion_html = build_html_with_page_markers(pages_text, start_page_num=p0)
 
+    # YAML front matter: include ISO 'date:' only if available; always include 'decision_date'
     fm = f"""---
 layout: case
 title: "{title}"
@@ -125,20 +143,22 @@ slip_cite: "{slip_cite}"
 court: "{court}"
 judge: "{judge}"
 docket: "{docket}"
-date: "{date_h}"
+decision_date: "{date_h}"
 volume: {vol}
 page_start: {p0}
 page_end: {p1}
 disposition: "{disp}"
-pdf_source: "/{pdf.as_posix()}"
----
+pdf_source: "{pdf.as_posix()}"
 """
+    if date_iso:
+        fm += f"date: {date_iso}\n"
+    fm += "---\n"
 
     content = fm + f"""
 <header class="case-header">
   <div class="cite"><strong>{reporter_cite}</strong></div>
   <div class="slip">Slip: {slip_cite}</div>
-  <div class="meta"><span>{court}</span> - <span>Judge {judge}</span></div>
+  <div class="meta"><span>{court}</span> · <span>Judge {judge}</span></div>
   <div class="disp"><em>{disp}</em></div>
 </header>
 
@@ -147,22 +167,30 @@ pdf_source: "/{pdf.as_posix()}"
 </main>
 """
     (outdir / "index.md").write_text(content, encoding="utf-8")
+
+    # Store a relative path (no leading slash) so links work under /<repo>/
     return {"title": title, "reporter_cite": reporter_cite, "slip_cite": slip_cite,
             "volume": vol, "page_start": p0, "page_end": p1, "judge": judge,
-            "docket": docket, "date": date_h, "path": f"/cases/{vol}/{p0}-{slug}/"}
+            "docket": docket, "date_iso": date_iso, "decision_date": date_h,
+            "path": f"cases/{vol}/{p0}-{slug}/"}
 
 def main():
     items = []
     for pdf in sorted(RULINGS.glob("**/*.pdf")):
         item = write_case(pdf, vol_state)
-        if item: items.append(item)
+        if item: 
+            items.append(item)
 
     VOL_FILE.write_text(json.dumps(vol_state, indent=2))
     (DATA / "search.json").write_text(json.dumps(items, indent=2), encoding="utf-8")
 
+    # Citator page (root; links are relative "cases/.../" to be base-path safe)
     rows = sorted(items, key=lambda x:(x["volume"], x["page_start"]))
     table = "\n".join([f"- [{r['reporter_cite']}]({r['path']}) — {r.get('judge','')}" for r in rows])
-    (ROOT / "citator.md").write_text(f"---\nlayout: default\ntitle: Citator\n---\n\n# Citator\n\n{table}\n", encoding="utf-8")
+    (ROOT / "citator.md").write_text(
+        "---\nlayout: default\ntitle: Citator\n---\n\n# Citator\n\n" + table + "\n",
+        encoding="utf-8"
+    )
 
 if __name__ == "__main__":
     main()
