@@ -14,12 +14,31 @@ if not VOL_FILE.exists():
     VOL_FILE.write_text(json.dumps({"current_volume": 1, "next_page": 1, "max_pages_per_volume": 800}, indent=2))
 vol_state = json.loads(VOL_FILE.read_text())
 
-# --- Header keys we understand (order not required; we accept any contiguous Key: Value block at top) ---
-HEADER_KEYS = [
+# Canonical header keys we support (order doesn't matter)
+CANONICAL_KEYS = [
     "Case Title", "Docket", "Decision Date", "Court", "Judge",
     "Disposition", "Keywords", "Summary", "Reporter Override", "Slip Override"
 ]
-HEADER_KEYSET = set(HEADER_KEYS)
+
+# Aliases → Canonical mapping (case-insensitive, spaces/dots ignored)
+ALIASES = {
+    "title": "Case Title",
+    "case title": "Case Title",
+    "case": "Case Title",
+    "docket": "Docket",
+    "decision date": "Decision Date",
+    "date": "Decision Date",
+    "decided": "Decision Date",
+    "court": "Court",
+    "judge": "Judge",
+    "disposition": "Disposition",
+    "outcome": "Disposition",
+    "keywords": "Keywords",
+    "tags": "Keywords",
+    "summary": "Summary",
+    "reporter override": "Reporter Override",
+    "slip override": "Slip Override",
+}
 
 # -------------------- Helpers --------------------
 def uclean(s: str) -> str:
@@ -27,6 +46,12 @@ def uclean(s: str) -> str:
     s = s.replace("：", ":").replace("\u00a0", " ")
     s = re.sub(r"[ \t]+", " ", s)
     return s
+
+def norm_key(k: str) -> str:
+    """lowercase & collapse spaces/punctuation to match aliases robustly"""
+    k = uclean(k).lower()
+    k = re.sub(r"[^a-z]+", " ", k).strip()
+    return k
 
 def split_header_body(first_page_text: str):
     """
@@ -37,12 +62,12 @@ def split_header_body(first_page_text: str):
     lines = first_page_text.splitlines()
     header_lines = []
     i = 0
-    while i < len(lines):
+    # allow a couple of blank lines at the very top
+    while i < len(lines) and not lines[i].strip():
+        i += 1
+    while i < len(lines) and len(header_lines) < 40:  # hard cap
         ln = lines[i].strip()
-        if not ln:  # skip blank at the very top (rare)
-            i += 1
-            continue
-        m = re.match(r"^([A-Za-z ]+)\s*:\s*(.*)$", ln)
+        m = re.match(r"^([A-Za-z .]+)\s*:\s*(.*)$", ln)
         if not m:
             break
         header_lines.append(ln)
@@ -51,21 +76,23 @@ def split_header_body(first_page_text: str):
     return header_lines, body_text
 
 def parse_header_from_lines(header_lines):
-    """Parse the Key: Value lines, trim inline comments, enforce the standard court line."""
-    hdr = {k: "" for k in HEADER_KEYS}
+    """Parse the Key: Value lines, case/alias tolerant; enforce standard court line."""
+    hdr = {k: "" for k in CANONICAL_KEYS}
     for ln in header_lines:
-        m = re.match(r"^([A-Za-z ]+)\s*:\s*(.*)$", ln)
-        if not m: 
+        m = re.match(r"^([A-Za-z .]+)\s*:\s*(.*)$", ln)
+        if not m:
             continue
-        key = m.group(1).strip()
+        raw_key = m.group(1).strip()
         val = m.group(2).strip()
         # trim inline comments like "  # guidance"
         if " #" in val:
             val = val.split(" #", 1)[0].rstrip()
-        if key in HEADER_KEYSET:
-            hdr[key] = uclean(val)
+        k_norm = norm_key(raw_key)
+        canon = ALIASES.get(k_norm)
+        if canon:
+            hdr[canon] = uclean(val)
 
-    # Enforce your standard court line regardless of input
+    # Always your fixed court line
     hdr["Court"] = "Mayflower District Court, District for the County of Clark"
     return hdr
 
@@ -91,7 +118,7 @@ def build_html_with_page_markers(pages_text, start_page_num, first_page_body_ove
     if not pages_text:
         return ""
 
-    # page 1 body
+    # page 1 body (strip header portion)
     first_body = first_page_body_override if first_page_body_override is not None else pages_text[0]
     for b in normalize_blocks(first_body):
         out.append(f"<p>{esc(b)}</p>")
@@ -108,7 +135,6 @@ def build_html_with_page_markers(pages_text, start_page_num, first_page_body_ove
         first = blocks[0]
         looks_cont = bool(re.match(r"^[a-z0-9,.;:)]", first))
         if looks_cont and out and out[-1].startswith("<p"):
-            # Continue same paragraph; insert only LEFT badge
             last = out.pop()
             if 'class="' in last.split(">")[0]:
                 last = last.replace('class="', 'class="has-pg ', 1)
@@ -152,15 +178,18 @@ def parse_decision_date(s: str):
     suf = "th" if 11<=day<=13 else {1:"st",2:"nd",3:"rd"}.get(day%10,"th")
     return iso, f"{mon_name} {day}{suf} {year}"
 
-def derive_year(date_iso: str, date_h: str, docket: str):
+def derive_year(date_iso: str, date_h: str, docket: str, title: str):
     if date_iso:
         return date_iso[:4]
     m = re.search(r"\b(20\d{2})\b", date_h or "")
     if m:
         return m.group(1)
-    m = re.search(r"-([0-9]{2})\b", docket or "")  # e.g., CR-168-25 → 25 → 2025 (heuristic)
+    m = re.search(r"-([0-9]{2})\b", docket or "")  # e.g., CR-168-25 → 2025
     if m:
         return f"20{m.group(1)}"
+    m = re.search(r"\b(20\d{2})\b", title or "")
+    if m:
+        return m.group(1)
     return "Unknown"
 
 # -------------------- Write a case --------------------
@@ -169,7 +198,6 @@ def write_case(pdf: Path, vol_state):
     if not pages_text:
         return None
 
-    # get header + body from page 1
     header_lines, first_body = split_header_body(pages_text[0])
     hdr = parse_header_from_lines(header_lines)
 
@@ -179,7 +207,7 @@ def write_case(pdf: Path, vol_state):
 
     docket = hdr.get("Docket") or ""
     date_iso, date_h = parse_decision_date(hdr.get("Decision Date") or "")
-    year = derive_year(date_iso, date_h, docket)
+    year = derive_year(date_iso, date_h, docket, title)
     judge = (hdr.get("Judge") or "").strip()
     disp  = (hdr.get("Disposition") or "").strip()
 
