@@ -4,7 +4,7 @@ from pypdf import PdfReader
 
 ROOT = Path(__file__).resolve().parents[1]
 RULINGS = ROOT / "rulings"
-CASES   = ROOT / "cases"
+CASES   = ROOT / "_cases"
 DATA    = ROOT / "_data"
 CASES.mkdir(exist_ok=True, parents=True)
 DATA.mkdir(exist_ok=True, parents=True)

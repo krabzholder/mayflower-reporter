@@ -5,4 +5,5 @@ markdown: kramdown
 collections:
   cases:
     output: true
+    permalink: /cases/:path/
 permalink: /:collection/:path/
