@@ -1,4 +1,4 @@
-import os, re, json
+import os, re, json, unicodedata
 from pathlib import Path
 from pypdf import PdfReader
 
@@ -16,20 +16,47 @@ vol_state = json.loads(VOL_FILE.read_text())
 
 EXPECTED = ["Case Title", "Docket", "Decision Date", "Court", "Judge", "Disposition", "Keywords", "Summary"]
 
+# ---------------------------
+# Header parsing helpers
+# ---------------------------
+def uclean(s: str) -> str:
+    """Normalize unicode and collapse odd spaces/colons so header keys match reliably."""
+    s = unicodedata.normalize("NFKC", s or "")
+    s = s.replace("：", ":").replace("\u00a0", " ")
+    s = re.sub(r"[ \t]+", " ", s)
+    return s
+
 def parse_header_from_text(text: str):
+    """Flexible, case-insensitive header parser that tolerates OCR spacing."""
+    text = uclean(text)
     lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
     hdr = {}
-    for key in EXPECTED:
+    patterns = {
+        "Case Title":    re.compile(r"^case\s*title\s*:\s*(.+)$", re.I),
+        "Docket":        re.compile(r"^docket\s*:\s*(.+)$", re.I),
+        "Decision Date": re.compile(r"^decision\s*date\s*:\s*(.+)$", re.I),
+        "Court":         re.compile(r"^court\s*:\s*(.+)$", re.I),
+        "Judge":         re.compile(r"^judge\s*:\s*(.+)$", re.I),
+        "Disposition":   re.compile(r"^disposition\s*:\s*(.+)$", re.I),
+        "Keywords":      re.compile(r"^keywords\s*:\s*(.+)$", re.I),
+        "Summary":       re.compile(r"^summary\s*:\s*(.+)$", re.I),
+    }
+    search_lines = lines[:80]  # search deeper to be safe
+    for key, rx in patterns.items():
         val = "MISSING DATA"
-        for i in range(min(18, len(lines))):
-            if lines[i].startswith(f"{key}:"):
-                val = lines[i].split(":",1)[1].strip()
+        for ln in search_lines:
+            m = rx.match(ln)
+            if m:
+                val = m.group(1).strip()
                 break
         hdr[key] = val
     # Enforce your standard court line
     hdr["Court"] = "Mayflower District Court, District for the County of Clark"
     return hdr
 
+# ---------------------------
+# PDF reading / block building
+# ---------------------------
 def read_pdf_pages(pdf: Path):
     reader = PdfReader(str(pdf))
     return [p.extract_text() or "" for p in reader.pages]
@@ -40,45 +67,70 @@ def normalize_blocks(raw: str):
     blocks = []
     for c in chunks:
         c = c.strip()
-        if not c: 
+        if not c:
             continue
         # collapse soft wraps inside a paragraph
         c = re.sub(r"[ \t]*\n[ \t]*", " ", c)
         blocks.append(c)
     return blocks
 
+# ---------------------------
+# Scholar-style inline page markers (no visible page breaks)
+# ---------------------------
 def build_html_with_page_markers(pages_text, start_page_num):
-    """Render paragraphs and insert right-margin page markers at PDF page boundaries (mid-paragraph when needed)."""
-    html_parts = []
-    if not pages_text: 
+    """
+    Render full paragraphs and insert, at each PDF page boundary:
+      - inline <sup class="pg" id="pg-N">N</sup>
+      - left & right margin badges <a class="pg-left/right">
+    """
+    out = []
+    if not pages_text:
         return ""
-    # page 1
-    first_blocks = normalize_blocks(pages_text[0])
-    for b in first_blocks:
-        html_parts.append(f"<p>{esc(b)}</p>")
+
+    # Page 1 paragraphs
+    blocks = normalize_blocks(pages_text[0])
+    for b in blocks:
+        out.append(f"<p>{esc(b)}</p>")
+
     pg = start_page_num
-    # later pages
+    # Subsequent pages: add markers where the next PDF page begins
     for i in range(1, len(pages_text)):
         pg += 1
         blocks = normalize_blocks(pages_text[i])
         if not blocks:
-            html_parts.append(f'<div class="page-break"><a id="pg-{pg}" class="page-marker" href="#pg-{pg}">{pg}</a></div>')
+            # if this page is empty text-wise, add inline sup to previous paragraph
+            if out and out[-1].startswith("<p>"):
+                out[-1] = out[-1][:-4] + f'<sup class="pg" id="pg-{pg}">{pg}</sup></p>'
             continue
+
         first = blocks[0]
         looks_continuation = bool(re.match(r"^[a-z0-9,.;:)]", first))
-        if looks_continuation and html_parts and html_parts[-1].startswith("<p>"):
-            # insert marker inline at end of previous <p>
-            html_parts[-1] = html_parts[-1][:-4] + f'<a id="pg-{pg}" class="page-marker" href="#pg-{pg}">{pg}</a>' + "</p>"
-            # continue with the remainder of the paragraph on this page
-            html_parts.append(f"<p>{esc(first)}</p>")
+        if looks_continuation and out and out[-1].startswith("<p>"):
+            # insert markers at end of previous paragraph
+            last = out.pop()
+            if 'class="' in last[:40]:
+                last = last.replace('class="', 'class="has-pg ', 1)
+            else:
+                last = last.replace("<p>", '<p class="has-pg">', 1)
+            last = last[:-4] + \
+                   f'<sup class="pg" id="pg-{pg}">{pg}</sup>' + \
+                   f'<a class="pg-right" href="#pg-{pg}">{pg}</a>' + \
+                   f'<a class="pg-left" href="#pg-{pg}">{pg}</a></p>'
+            out.append(last)
+            # then print the continuation content on this page
+            out.append(f"<p>{esc(first)}</p>")
             for b in blocks[1:]:
-                html_parts.append(f"<p>{esc(b)}</p>")
+                out.append(f"<p>{esc(b)}</p>")
         else:
-            # break between paragraphs
-            html_parts.append(f'<div class="page-break"><a id="pg-{pg}" class="page-marker" href="#pg-{pg}">{pg}</a></div>')
-            for b in blocks:
-                html_parts.append(f"<p>{esc(b)}</p>")
-    return "\n".join(html_parts)
+            # new paragraph starts the page; put markers at the beginning of that paragraph
+            first_html = f'<p class="has-pg"><sup class="pg" id="pg-{pg}">{pg}</sup>' \
+                         f'<a class="pg-right" href="#pg-{pg}">{pg}</a>' \
+                         f'<a class="pg-left" href="#pg-{pg}">{pg}</a> {esc(first)}</p>'
+            out.append(first_html)
+            for b in blocks[1:]:
+                out.append(f"<p>{esc(b)}</p>")
+
+    return "\n".join(out)
 
 def esc(t: str):
     return t.replace("&","&amp;").replace("<","&lt;").replace(">","&gt;")
@@ -88,8 +140,12 @@ def slugify(s: str):
     s = re.sub(r"[^a-z0-9]+", "-", s).strip("-")
     return s or "case"
 
+# ---------------------------
+# Date parsing (ISO for Jekyll + human for display)
+# ---------------------------
 def parse_decision_date(s: str):
     """Return (iso_date or None, human_date with suffix)."""
+    s = uclean(s)
     months = {m:i for i,m in enumerate(
         ["January","February","March","April","May","June","July","August","September","October","November","December"], 1)}
     m = re.search(r"([A-Za-z]+)\s+(\d{1,2})(?:st|nd|rd|th)?[, ]+(\d{4})", s or "")
@@ -102,10 +158,14 @@ def parse_decision_date(s: str):
     human = f"{mon_name} {day}{suf} {year}"
     return iso, human
 
+# ---------------------------
+# Write a case
+# ---------------------------
 def write_case(pdf: Path, vol_state):
     pages_text = read_pdf_pages(pdf)
     if not pages_text:
         return None
+
     hdr = parse_header_from_text(pages_text[0])
     title  = hdr.get("Case Title") if hdr.get("Case Title") != "MISSING DATA" else pdf.stem.replace("_"," ").title()
     docket = hdr.get("Docket","MISSING DATA")
@@ -134,7 +194,7 @@ def write_case(pdf: Path, vol_state):
 
     opinion_html = build_html_with_page_markers(pages_text, start_page_num=p0)
 
-    # YAML front matter: include ISO 'date:' only if available; always include 'decision_date'
+    # YAML: include ISO 'date:' only if available; always include 'decision_date'
     fm = f"""---
 layout: case
 title: "{title}"
@@ -160,6 +220,7 @@ pdf_source: "{pdf.as_posix()}"
   <div class="slip">Slip: {slip_cite}</div>
   <div class="meta"><span>{court}</span> · <span>Judge {judge}</span></div>
   <div class="disp"><em>{disp}</em></div>
+  <div class="slip">Cite as: <code>{vol} M.2d {p0}</code></div>
 </header>
 
 <main class="opinion">
@@ -170,15 +231,18 @@ pdf_source: "{pdf.as_posix()}"
 
     # Store a relative path (no leading slash) so links work under /<repo>/
     return {"title": title, "reporter_cite": reporter_cite, "slip_cite": slip_cite,
-            "volume": vol, "page_start": p0, "page_end": p1, "judge": judge,
+            "volume": vol, "page_start": p0, "page_end": {p1}, "judge": judge,
             "docket": docket, "date_iso": date_iso, "decision_date": date_h,
             "path": f"cases/{vol}/{p0}-{slug}/"}
 
+# ---------------------------
+# Build site data
+# ---------------------------
 def main():
     items = []
     for pdf in sorted(RULINGS.glob("**/*.pdf")):
         item = write_case(pdf, vol_state)
-        if item: 
+        if item:
             items.append(item)
 
     VOL_FILE.write_text(json.dumps(vol_state, indent=2))

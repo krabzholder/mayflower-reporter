@@ -22,9 +22,37 @@ body.dark{ background:#0c0f14; color:#e5e7eb; --paper:#11151b; --border:#232b35;
 
 .page-break{ position: relative; }
 .page-marker{
-  position: absolute; right: -2.8rem; top: 0.1rem;
+  /* Scholar-style tiny inline page numbers; show left & right badges on wide screens */
+.opinion sup.pg {
+  vertical-align: super;
+  font-size: .75em;
+  color: var(--muted);
+  text-decoration: none;
+  padding-left: .15rem;
+}
+.opinion p.has-pg { position: relative; }
+
+/* Right-margin badge */
+.opinion p.has-pg .pg-right {
+  position: absolute; right: -2.8rem; top: .1rem;
   font-size: .85rem; color: var(--muted);
   border: 1px solid var(--border); background: var(--paper);
-  padding: 0 .4rem; border-radius: 6px; text-decoration: none;
+  padding: 0 .35rem; border-radius: 6px; text-decoration: none;
+}
+
+/* Left-margin badge */
+.opinion p.has-pg .pg-left {
+  position: absolute; left: -2.8rem; top: .1rem;
+  font-size: .85rem; color: var(--muted);
+  border: 1px solid var(--border); background: var(--paper);
+  padding: 0 .35rem; border-radius: 6px; text-decoration: none;
+}
+
+/* Collapse badges to inline on narrow screens */
+@media (max-width: 980px){
+  .opinion p.has-pg .pg-right,
+  .opinion p.has-pg .pg-left { position: static; margin-left:.35rem; }
+}
+
 }
 @media (max-width:980px){ .page-marker{ position: static; display:inline-block; margin-left:.4rem; } }
