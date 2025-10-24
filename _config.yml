@@ -1,0 +1,8 @@
+title: "Mayflower Reporter (M.2d)"
+description: "Official digital reporter for Mayflower District Court rulings"
+theme: minima
+markdown: kramdown
+collections:
+  cases:
+    output: true
+permalink: /:collection/:path/
