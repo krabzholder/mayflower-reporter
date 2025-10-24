@@ -3,47 +3,52 @@ layout: default
 ---
 
 <article class="case-page">
-
-  <!-- Header / metadata block -->
   <section class="case-header">
     <h1 class="case-caption">
       {{ page.case_title }},
       <span class="case-cite">{{ page.reporter_cite }}</span>
-      {% if page.decision_year %} <span class="case-year">({{ page.decision_year }})</span>{% endif %}
+      {% unless page.decision_year == blank %}<span class="case-year">({{ page.decision_year }})</span>{% endunless %}
     </h1>
 
     <div class="case-submeta">
-      {% if page.slipline %}
+      {% unless page.slipline == blank %}
         <div class="subline">Slip: {{ page.slipline }}</div>
-      {% endif %}
-      <div class="subline">
-        {% if page.court %}{{ page.court }}{% endif %}
-        {% if page.judge %} · Judge {{ page.judge }}{% endif %}
-        {% if page.decision_date %} · {{ page.decision_date }}{% endif %}
-      </div>
+      {% endunless %}
+
+      {% assign have_meta = false %}
+      {% unless page.court == blank and page.judge == blank and page.decision_date == blank %}
+        <div class="subline">
+          {% unless page.court == blank %}{{ page.court }}{% assign have_meta = true %}{% endunless %}
+          {% unless page.judge == blank %}{% if have_meta %} · {% endif %}Judge {{ page.judge }}{% assign have_meta = true %}{% endunless %}
+          {% unless page.decision_date == blank %}{% if have_meta %} · {% endif %}{{ page.decision_date }}{% endunless %}
+        </div>
+      {% endunless %}
+
       <div class="subline">
         <span>Cite as:</span>
         <span class="mono">{{ page.reporter_cite }}</span>
       </div>
-      {% if page.disposition %}
+
+      {% unless page.disposition == blank %}
       <div class="disposition">{{ page.disposition }}</div>
-      {% endif %}
-      {% if page.keywords %}
+      {% endunless %}
+
+      {% unless page.keywords == blank %}
       <div class="keywords">
         {% for k in page.keywords %}
           <span class="kw">{{ k }}</span>
         {% endfor %}
       </div>
-      {% endif %}
-      {% if page.pdf_path %}
+      {% endunless %}
+
+      {% unless page.pdf_path == blank %}
       <div class="pdf-link">
         <a href="{{ page.pdf_path | relative_url }}">Download PDF</a>
       </div>
-      {% endif %}
+      {% endunless %}
     </div>
   </section>
 
-  <!-- Body with page-gutter markers like Google Scholar -->
   <section class="case-body">
     <div class="gutter" aria-hidden="true"></div>
     <div class="opinion">
@@ -51,13 +56,12 @@ layout: default
     </div>
   </section>
 
-  <!-- Bottom nav -->
   <section class="case-nav">
-    {% if page.prev_path %}
+    {% unless page.prev_path == blank %}
       <a class="btn" href="{{ page.prev_path | relative_url }}">&larr; Previous</a>
-    {% endif %}
-    {% if page.next_path %}
+    {% endunless %}
+    {% unless page.next_path == blank %}
       <a class="btn" href="{{ page.next_path | relative_url }}">Next &rarr;</a>
-    {% endif %}
+    {% endunless %}
   </section>
 </article>

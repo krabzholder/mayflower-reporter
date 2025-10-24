@@ -14,7 +14,7 @@ if not VOL_FILE.exists():
     VOL_FILE.write_text(json.dumps({"current_volume": 1, "next_page": 1, "max_pages_per_volume": 800}, indent=2))
 vol_state = json.loads(VOL_FILE.read_text())
 
-PAGE_CHAR_BUDGET = 1800  # heuristic
+PAGE_CHAR_BUDGET = 1800
 
 def normalize(s: str) -> str:
     return unicodedata.normalize("NFKC", s or "").strip()
@@ -31,20 +31,14 @@ def read_pdf_text(pdf_path: Path) -> str:
 
 def split_header_body(full_text: str):
     lines = [normalize(l) for l in full_text.splitlines()]
-    header_lines = []
-    i = 0
+    header_lines, i = [], 0
     while i < len(lines) and len(header_lines) < 60:
         ln = lines[i]
         if not ln:
-            if header_lines:
-                i += 1
-                break
-            else:
-                i += 1
-                continue
+            if header_lines: i += 1; break
+            i += 1; continue
         if re.search(r"^[A-Za-z][A-Za-z .]*\s*:", ln):
-            header_lines.append(ln)
-            i += 1
+            header_lines.append(ln); i += 1
         else:
             break
     body_text = "\n".join(lines[i:]) if i < len(lines) else ""
@@ -54,11 +48,9 @@ def parse_header(header_lines):
     M = {}
     for ln in header_lines:
         m = re.match(r"^([A-Za-z][A-Za-z .]*?)\s*:\s*(.*)$", ln)
-        if not m:
-            continue
-        k, v = m.group(1).strip(), m.group(2).strip()
-        key = k.lower().replace(" ", "_")
-        M[key] = v
+        if not m: continue
+        key = m.group(1).strip().lower().replace(" ", "_")
+        M[key] = m.group(2).strip()
     return {
         "case_title": M.get("case_title") or M.get("title") or "",
         "docket": M.get("docket") or "",
@@ -72,12 +64,11 @@ def parse_header(header_lines):
     }
 
 def year_from_date(s: str) -> str:
-    m = re.search(r"(20\d{2}|19\d{2})", s or "")
-    return m.group(1) if m else ""
+    m = re.search(r"(20\d{2}|19\d{2})", s or ""); return m.group(1) if m else ""
 
 def make_slug(s: str) -> str:
     s = normalize(s).lower()
-    s = re.sub(r"[^a-z0-9]+", "-", s).strip("-")
+    s = re.sub(r"[^a-z0-9]+","-",s).strip("-")
     return s or "case"
 
 def ensure_volume(vol_state):
@@ -86,55 +77,57 @@ def ensure_volume(vol_state):
         vol_state["next_page"] = 1
 
 def reserve_pages(vol_state, body_text: str):
-    text = body_text.strip()
-    n_pages = max(1, (len(text) + PAGE_CHAR_BUDGET - 1) // PAGE_CHAR_BUDGET)
+    n_pages = max(1, (len(body_text.strip()) + PAGE_CHAR_BUDGET - 1) // PAGE_CHAR_BUDGET)
     ensure_volume(vol_state)
-    start = vol_state["next_page"]
-    end = start + n_pages - 1
+    start = vol_state["next_page"]; end = start + n_pages - 1
     vol_state["next_page"] = end + 1
     return start, end
 
 def inject_page_markers(volume: int, page_start: int, body_text: str) -> str:
-    chunks = []
-    remaining = body_text
-    idx = 0
+    chunks, remaining, idx = [], body_text, 0
     while remaining:
-        take = remaining[:PAGE_CHAR_BUDGET]
-        rest = remaining[PAGE_CHAR_BUDGET:]
+        take = remaining[:PAGE_CHAR_BUDGET]; remaining = remaining[PAGE_CHAR_BUDGET:]
         if idx == 0:
             chunks.append(take)
         else:
             cite = f"{volume} M.2d {page_start + idx}"
-            marker = f"\n\n<hr class=\"page-marker\" data-cite=\"{cite}\">\n\n"
-            chunks.append(marker + take)
-        remaining = rest
+            chunks.append(f"\n\n<hr class=\"page-marker\" data-cite=\"{cite}\">\n\n{take}")
         idx += 1
     return "".join(chunks)
 
+def normalize_paragraphs(txt: str) -> str:
+    """
+    Preserve true paragraph breaks, but join hard-wrapped lines into sentences.
+    1) Mark paragraph breaks (2+ newlines) with a token
+    2) Replace remaining single newlines with spaces
+    3) Restore paragraph breaks
+    """
+    txt = txt.replace("\r\n","\n")
+    txt = re.sub(r"\n{2,}", "¶¶", txt)   # temporary paragraph token
+    txt = re.sub(r"\s*\n\s*", " ", txt)  # join wrapped lines
+    txt = re.sub(r"[ ]{2,}", " ", txt).strip()
+    txt = txt.replace("¶¶", "\n\n")
+    return txt
+
 def render_markdown_html(txt: str) -> str:
-    """Wrap paragraphs and sanitize intra-paragraph newlines to spaces."""
-    # collapse Windows newlines
-    txt = txt.replace("\r\n", "\n")
-    paras = [p.strip() for p in re.split(r"\n\s*\n", txt.strip()) if p.strip()]
-    cleaned = []
-    for p in paras:
-        # 🔧 replace single newlines with spaces, collapse multiple spaces
-        p = re.sub(r"\s*\n\s*", " ", p)
-        p = re.sub(r"[ ]{2,}", " ", p)
-        cleaned.append(f"<p>{p}</p>")
-    return "\n\n".join(cleaned)
+    txt = normalize_paragraphs(txt)
+    paras = [p.strip() for p in re.split(r"\n\s*\n", txt) if p.strip()]
+    return "\n\n".join([f"<p>{p}</p>" for p in paras])
+
+def infer_from_filename(pdf: Path):
+    stem = pdf.stem  # e.g. "CR-168-25 State of Mayflower v. Kash0507 Ruling"
+    m = re.match(r"^([A-Z]{2,}-\d{1,}-\d{2,})\s+(.*)$", stem)
+    docket, title = "", stem
+    if m:
+        docket = m.group(1)
+        title = m.group(2)
+    return docket, title
 
 def build_slipline(case_title, docket, court, decision_date):
     parts = [case_title]
-    if docket:
-        parts.append(f"No. {docket}")
-    tail = []
-    if court:
-        tail.append(court)
-    if decision_date:
-        tail.append(decision_date)
-    if tail:
-        parts.append(f"({'; '.join(tail)})")
+    if docket: parts.append(f"No. {docket}")
+    tail = "; ".join([c for c in [court, decision_date] if c])
+    if tail: parts.append(f"({tail})")
     return ", ".join(parts)
 
 def write_case(pdf: Path, vol_state):
@@ -142,8 +135,9 @@ def write_case(pdf: Path, vol_state):
     header_lines, body_text = split_header_body(full_text)
     H = parse_header(header_lines)
 
-    case_title = normalize(H["case_title"]) or pdf.stem
-    docket = normalize(H["docket"])
+    fn_docket, fn_title = infer_from_filename(pdf)
+    case_title = normalize(H["case_title"]) or fn_title or pdf.stem
+    docket = normalize(H["docket"]) or fn_docket
     decision_date = normalize(H["decision_date"])
     decision_year = year_from_date(decision_date)
     court = normalize(H["court"])
@@ -194,7 +188,7 @@ def write_case(pdf: Path, vol_state):
     md = "---\n" + "\n".join([f"{k}: {json.dumps(v, ensure_ascii=False)}" for k,v in fm.items()]) + "\n---\n\n" + body_html + "\n"
     (out_dir / "index.md").write_text(md, encoding="utf-8")
 
-    item = {
+    return {
       "title": case_title,
       "reporter_cite": reporter_cite,
       "volume": volume,
@@ -207,14 +201,12 @@ def write_case(pdf: Path, vol_state):
       "keywords": keywords,
       "path": f"/cases/{volume}/{path_slug}/"
     }
-    return item
 
 def main():
     items = []
     for pdf in sorted(RULINGS.glob("*.pdf")):
         item = write_case(pdf, vol_state)
-        if item:
-            items.append(item)
+        if item: items.append(item)
 
     VOL_FILE.write_text(json.dumps(vol_state, indent=2), encoding="utf-8")
     (DATA / "search.json").write_text(json.dumps(items, indent=2), encoding="utf-8")
