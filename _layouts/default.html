@@ -4,20 +4,22 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>{{ page.title }} | {{ site.title }}</title>
-  <link rel="stylesheet" href="/assets/css/reporter.css">
+  <link rel="stylesheet" href="{{ '/assets/css/reporter.css' | relative_url }}">
   <meta name="color-scheme" content="light dark">
 </head>
 <body class="light">
   <header class="site">
-    <a class="brand" href="/">{{ site.title }}</a>
+    <a class="brand" href="{{ '/' | relative_url }}">{{ site.title }}</a>
     <nav class="nav">
-      <a href="/">Home</a>
-      <a href="/citator.html">Citator</a>
+      <a href="{{ '/' | relative_url }}">Home</a>
+      <a href="{{ '/citator' | relative_url }}">Citator</a>
     </nav>
     <button id="themeToggle" aria-label="Toggle dark mode">🌓</button>
   </header>
+
   <main class="container">{{ content }}</main>
-  <script src="/assets/js/search.js" defer></script>
+
+  <script src="{{ '/assets/js/search.js' | relative_url }}" defer></script>
   <script>
   (function(){
     const key='theme'; const btn=document.getElementById('themeToggle');
