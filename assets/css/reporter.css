@@ -20,7 +20,7 @@ body.dark{background:#0c0f14;color:#e5e7eb;--paper:#11151b;--border:#232b35;--mu
 .case-header .disp{margin-top:.35rem;font-style:italic;}
 .opinion p{line-height:1.72;margin:1rem 0;}
 
-/* === Scholar-style page markers === */
+/* Scholar-style page markers: tiny inline superscript + LEFT margin badge only */
 .opinion sup.pg{
   vertical-align:super;
   font-size:.75em;
@@ -30,19 +30,13 @@ body.dark{background:#0c0f14;color:#e5e7eb;--paper:#11151b;--border:#232b35;--mu
 }
 .opinion p.has-pg{position:relative;}
 .opinion p.has-pg .pg-left{
-  position:absolute;
-  left:-2.8rem;
-  top:.1rem;
-  font-size:.85rem;
-  color:var(--muted);
-  border:1px solid var(--border);
-  background:var(--paper);
-  padding:0 .35rem;
-  border-radius:6px;
-  text-decoration:none;
+  position:absolute; left:-2.8rem; top:.1rem;
+  font-size:.85rem; color:var(--muted);
+  border:1px solid var(--border); background:var(--paper);
+  padding:0 .35rem; border-radius:6px; text-decoration:none;
 }
 
-/* On narrow screens, hide side badges */
+/* On narrow screens keep only the inline superscript; hide side badge */
 @media (max-width:980px){
   .opinion p.has-pg .pg-left{display:none;}
 }

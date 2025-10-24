@@ -1,4 +1,4 @@
-import os, re, json, unicodedata
+import re, json, unicodedata
 from pathlib import Path
 from pypdf import PdfReader
 
@@ -14,71 +14,86 @@ if not VOL_FILE.exists():
     VOL_FILE.write_text(json.dumps({"current_volume": 1, "next_page": 1, "max_pages_per_volume": 800}, indent=2))
 vol_state = json.loads(VOL_FILE.read_text())
 
-# -------- Header spec (first 10 non-blank lines) --------
+# --- Header keys we understand (order not required; we accept any contiguous Key: Value block at top) ---
 HEADER_KEYS = [
     "Case Title", "Docket", "Decision Date", "Court", "Judge",
     "Disposition", "Keywords", "Summary", "Reporter Override", "Slip Override"
 ]
-HEADER_LINES_REQUIRED = 10
+HEADER_KEYSET = set(HEADER_KEYS)
 
-# ---------- header parsing helpers ----------
+# -------------------- Helpers --------------------
 def uclean(s: str) -> str:
-    """Normalize unicode and collapse odd spaces/colons so header keys match reliably."""
     s = unicodedata.normalize("NFKC", s or "")
     s = s.replace("：", ":").replace("\u00a0", " ")
     s = re.sub(r"[ \t]+", " ", s)
     return s
 
-def parse_header_from_text(text: str):
-    """Parse only the first 10 header lines for KEY: value pairs."""
-    text  = uclean(text)
-    lines = [ln.strip() for ln in text.splitlines() if ln.strip()][:HEADER_LINES_REQUIRED]
-    hdr = {k: "" for k in HEADER_KEYS}
-    for ln in lines:
+def split_header_body(first_page_text: str):
+    """
+    Detect a header at the very top as a contiguous run of lines matching 'Key: value'.
+    Stop at the first line that doesn't match that shape.
+    Return (header_lines:list[str], body_text:str).
+    """
+    lines = first_page_text.splitlines()
+    header_lines = []
+    i = 0
+    while i < len(lines):
+        ln = lines[i].strip()
+        if not ln:  # skip blank at the very top (rare)
+            i += 1
+            continue
         m = re.match(r"^([A-Za-z ]+)\s*:\s*(.*)$", ln)
-        if not m: continue
-        key, val = m.group(1).strip(), m.group(2).strip()
+        if not m:
+            break
+        header_lines.append(ln)
+        i += 1
+    body_text = "\n".join(lines[i:]) if i < len(lines) else ""
+    return header_lines, body_text
+
+def parse_header_from_lines(header_lines):
+    """Parse the Key: Value lines, trim inline comments, enforce the standard court line."""
+    hdr = {k: "" for k in HEADER_KEYS}
+    for ln in header_lines:
+        m = re.match(r"^([A-Za-z ]+)\s*:\s*(.*)$", ln)
+        if not m: 
+            continue
+        key = m.group(1).strip()
+        val = m.group(2).strip()
+        # trim inline comments like "  # guidance"
         if " #" in val:
             val = val.split(" #", 1)[0].rstrip()
-        if key in hdr:
-            hdr[key] = val
+        if key in HEADER_KEYSET:
+            hdr[key] = uclean(val)
+
+    # Enforce your standard court line regardless of input
     hdr["Court"] = "Mayflower District Court, District for the County of Clark"
     return hdr
 
-# ---------- pdf reading / blocks ----------
 def read_pdf_pages(pdf: Path):
     reader = PdfReader(str(pdf))
     return [p.extract_text() or "" for p in reader.pages]
 
 def normalize_blocks(raw: str):
+    """Do NOT create new paragraphs unless there's an actual blank line."""
     raw = raw.replace("\r\n", "\n").replace("\r", "\n")
-    # Do NOT break paragraphs unless there’s an actual blank line
     chunks = re.split(r"\n{2,}", raw)
     blocks = []
     for c in chunks:
         c = c.strip()
-        if not c: continue
+        if not c:
+            continue
         blocks.append(re.sub(r"[ \t]*\n[ \t]*", " ", c))
     return blocks
 
-# ---------- Scholar-style inline page markers ----------
-def build_html_with_page_markers(pages_text, start_page_num):
+# -------------------- Page markers (Scholar style; left only) --------------------
+def build_html_with_page_markers(pages_text, start_page_num, first_page_body_override=None):
     out = []
-    if not pages_text: return ""
+    if not pages_text:
+        return ""
 
-    # Remove the header lines from the first page
-    def strip_header(page_text: str):
-        lines = page_text.splitlines()
-        nonblank = 0
-        for i, ln in enumerate(lines):
-            if ln.strip():
-                nonblank += 1
-            if nonblank == HEADER_LINES_REQUIRED:
-                return "\n".join(lines[i+1:])
-        return page_text
-
-    first_page = strip_header(pages_text[0])
-    for b in normalize_blocks(first_page):
+    # page 1 body
+    first_body = first_page_body_override if first_page_body_override is not None else pages_text[0]
+    for b in normalize_blocks(first_body):
         out.append(f"<p>{esc(b)}</p>")
 
     pg = start_page_num
@@ -93,7 +108,7 @@ def build_html_with_page_markers(pages_text, start_page_num):
         first = blocks[0]
         looks_cont = bool(re.match(r"^[a-z0-9,.;:)]", first))
         if looks_cont and out and out[-1].startswith("<p"):
-            # Continue same paragraph
+            # Continue same paragraph; insert only LEFT badge
             last = out.pop()
             if 'class="' in last.split(">")[0]:
                 last = last.replace('class="', 'class="has-pg ', 1)
@@ -119,16 +134,18 @@ def esc(t: str):
 def slugify(s: str, max_len: int = 80):
     s = s.lower()
     s = re.sub(r"[^a-z0-9]+", "-", s).strip("-")
-    if len(s) > max_len: s = s[:max_len].rstrip("-")
+    if len(s) > max_len:
+        s = s[:max_len].rstrip("-")
     return s or "case"
 
-# ---------- date helpers ----------
+# -------------------- Date helpers --------------------
 def parse_decision_date(s: str):
     s = uclean(s)
     months = {m:i for i,m in enumerate(
         ["January","February","March","April","May","June","July","August","September","October","November","December"], 1)}
     m = re.search(r"([A-Za-z]+)\s+(\d{1,2})(?:st|nd|rd|th)?[, ]+(\d{4})", s or "")
-    if not m: return None, ""
+    if not m:
+        return None, ""
     mon_name, day, year = m.group(1), int(m.group(2)), int(m.group(3))
     mon = months.get(mon_name, 1)
     iso = f"{year:04d}-{mon:02d}-{day:02d}"
@@ -136,27 +153,35 @@ def parse_decision_date(s: str):
     return iso, f"{mon_name} {day}{suf} {year}"
 
 def derive_year(date_iso: str, date_h: str, docket: str):
-    if date_iso: return date_iso[:4]
+    if date_iso:
+        return date_iso[:4]
     m = re.search(r"\b(20\d{2})\b", date_h or "")
-    if m: return m.group(1)
-    m = re.search(r"-([0-9]{2})\b", docket or "")
-    if m: return f"20{m.group(1)}"
+    if m:
+        return m.group(1)
+    m = re.search(r"-([0-9]{2})\b", docket or "")  # e.g., CR-168-25 → 25 → 2025 (heuristic)
+    if m:
+        return f"20{m.group(1)}"
     return "Unknown"
 
-# ---------- write a case ----------
+# -------------------- Write a case --------------------
 def write_case(pdf: Path, vol_state):
     pages_text = read_pdf_pages(pdf)
-    if not pages_text: return None
+    if not pages_text:
+        return None
 
-    hdr = parse_header_from_text(pages_text[0])
+    # get header + body from page 1
+    header_lines, first_body = split_header_body(pages_text[0])
+    hdr = parse_header_from_lines(header_lines)
 
-    title = re.sub(r"\s+", " ", hdr.get("Case Title") or pdf.stem.replace("_"," ").title()).strip()
-    if len(title) > 160: title = title[:160].rstrip()
+    title = re.sub(r"\s+", " ", (hdr.get("Case Title") or pdf.stem.replace("_"," ").title())).strip()
+    if len(title) > 160:
+        title = title[:160].rstrip()
+
     docket = hdr.get("Docket") or ""
     date_iso, date_h = parse_decision_date(hdr.get("Decision Date") or "")
     year = derive_year(date_iso, date_h, docket)
-    judge = hdr.get("Judge", "").strip()
-    disp = hdr.get("Disposition", "").strip()
+    judge = (hdr.get("Judge") or "").strip()
+    disp  = (hdr.get("Disposition") or "").strip()
 
     pages = max(1, len(pages_text))
     if vol_state["next_page"] + pages - 1 > vol_state["max_pages_per_volume"]:
@@ -164,19 +189,20 @@ def write_case(pdf: Path, vol_state):
         vol_state["next_page"] = 1
 
     vol = vol_state["current_volume"]
-    p0, p1 = vol_state["next_page"], vol_state["next_page"] + pages - 1
+    p0  = vol_state["next_page"]
+    p1  = p0 + pages - 1
     vol_state["next_page"] = p1 + 1
 
-    rep_override = hdr.get("Reporter Override", "").strip()
-    slip_override = hdr.get("Slip Override", "").strip()
+    rep_override  = (hdr.get("Reporter Override") or "").strip()
+    slip_override = (hdr.get("Slip Override") or "").strip()
     reporter_cite = rep_override or f"{title}, {vol} M.2d {p0} ({year})"
-    slip_cite = slip_override or f"{title}, No. {docket or 'Unknown'} (Mayflower Dist. Ct. {date_h or year})"
+    slip_cite     = slip_override or f"{title}, No. {docket or 'Unknown'} (Mayflower Dist. Ct. {date_h or year})"
 
     slug = slugify(title, 80)
     outdir = CASES / f"{vol}" / f"{p0}-{slug}"
     outdir.mkdir(parents=True, exist_ok=True)
 
-    opinion_html = build_html_with_page_markers(pages_text, p0)
+    opinion_html = build_html_with_page_markers(pages_text, start_page_num=p0, first_page_body_override=first_body)
 
     fm = f"""---
 layout: case
@@ -193,7 +219,8 @@ page_end: {p1}
 disposition: "{disp}"
 pdf_source: "{pdf.as_posix()}"
 """
-    if date_iso: fm += f"date: {date_iso}\n"
+    if date_iso:
+        fm += f"date: {date_iso}\n"
     fm += "---\n"
 
     content = fm + f"""
@@ -216,19 +243,22 @@ pdf_source: "{pdf.as_posix()}"
             "docket": docket, "date_iso": date_iso, "decision_date": date_h,
             "path": f"cases/{vol}/{p0}-{slug}/"}
 
-# ---------- build site data ----------
+# -------------------- Build site data --------------------
 def main():
     items = []
     for pdf in sorted(RULINGS.glob("**/*.pdf")):
         item = write_case(pdf, vol_state)
-        if item: items.append(item)
+        if item:
+            items.append(item)
+
     VOL_FILE.write_text(json.dumps(vol_state, indent=2))
     (DATA / "search.json").write_text(json.dumps(items, indent=2), encoding="utf-8")
 
     rows = sorted(items, key=lambda x:(x["volume"], x["page_start"]))
     table = "\n".join([f"- [{r['reporter_cite']}]({r['path']}) — {r.get('judge','')}" for r in rows])
     (ROOT / "citator.md").write_text(
-        "---\nlayout: default\ntitle: Citator\n---\n\n# Citator\n\n" + table + "\n", encoding="utf-8"
+        "---\nlayout: default\ntitle: Citator\n---\n\n# Citator\n\n" + table + "\n",
+        encoding="utf-8"
     )
 
 if __name__ == "__main__":
