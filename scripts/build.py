@@ -14,7 +14,7 @@ if not VOL_FILE.exists():
     VOL_FILE.write_text(json.dumps({"current_volume": 1, "next_page": 1, "max_pages_per_volume": 800}, indent=2))
 vol_state = json.loads(VOL_FILE.read_text())
 
-PAGE_CHAR_BUDGET = 1800  # heuristic for web pagination; tune per your taste
+PAGE_CHAR_BUDGET = 1800  # heuristic
 
 def normalize(s: str) -> str:
     return unicodedata.normalize("NFKC", s or "").strip()
@@ -30,21 +30,18 @@ def read_pdf_text(pdf_path: Path) -> str:
     return "\n".join(parts)
 
 def split_header_body(full_text: str):
-    """Split at first blank line after a run of 'Field: value' lines."""
     lines = [normalize(l) for l in full_text.splitlines()]
     header_lines = []
     i = 0
     while i < len(lines) and len(header_lines) < 60:
         ln = lines[i]
         if not ln:
-            # stop header when we hit an empty line AFTER at least 1 header line
             if header_lines:
                 i += 1
                 break
             else:
                 i += 1
                 continue
-        # header if it looks like "Word(s): value"
         if re.search(r"^[A-Za-z][A-Za-z .]*\s*:", ln):
             header_lines.append(ln)
             i += 1
@@ -57,12 +54,11 @@ def parse_header(header_lines):
     M = {}
     for ln in header_lines:
         m = re.match(r"^([A-Za-z][A-Za-z .]*?)\s*:\s*(.*)$", ln)
-        if not m: 
+        if not m:
             continue
         k, v = m.group(1).strip(), m.group(2).strip()
         key = k.lower().replace(" ", "_")
         M[key] = v
-    # canonical keys
     return {
         "case_title": M.get("case_title") or M.get("title") or "",
         "docket": M.get("docket") or "",
@@ -90,7 +86,6 @@ def ensure_volume(vol_state):
         vol_state["next_page"] = 1
 
 def reserve_pages(vol_state, body_text: str):
-    """Estimate how many web pages the opinion will occupy; return start,end."""
     text = body_text.strip()
     n_pages = max(1, (len(text) + PAGE_CHAR_BUDGET - 1) // PAGE_CHAR_BUDGET)
     ensure_volume(vol_state)
@@ -100,17 +95,13 @@ def reserve_pages(vol_state, body_text: str):
     return start, end
 
 def inject_page_markers(volume: int, page_start: int, body_text: str) -> str:
-    """Insert <hr class='page-marker' data-cite='1 M.2d 27'> inside the body only."""
-    # We'll break by character budget and inject before the boundary paragraph.
     chunks = []
     remaining = body_text
-    current_page = page_start
     idx = 0
     while remaining:
         take = remaining[:PAGE_CHAR_BUDGET]
         rest = remaining[PAGE_CHAR_BUDGET:]
         if idx == 0:
-            # first chunk: start of body (no marker yet; page_start is implied)
             chunks.append(take)
         else:
             cite = f"{volume} M.2d {page_start + idx}"
@@ -121,17 +112,36 @@ def inject_page_markers(volume: int, page_start: int, body_text: str) -> str:
     return "".join(chunks)
 
 def render_markdown_html(txt: str) -> str:
-    """Very light Markdown to HTML for paragraphs; Jekyll will run kramdown anyway,
-    but we keep it plaintext-friendly. We only wrap paragraphs here."""
+    """Wrap paragraphs and sanitize intra-paragraph newlines to spaces."""
+    # collapse Windows newlines
+    txt = txt.replace("\r\n", "\n")
     paras = [p.strip() for p in re.split(r"\n\s*\n", txt.strip()) if p.strip()]
-    return "\n\n".join([f"<p>{p}</p>" for p in paras])
+    cleaned = []
+    for p in paras:
+        # 🔧 replace single newlines with spaces, collapse multiple spaces
+        p = re.sub(r"\s*\n\s*", " ", p)
+        p = re.sub(r"[ ]{2,}", " ", p)
+        cleaned.append(f"<p>{p}</p>")
+    return "\n\n".join(cleaned)
+
+def build_slipline(case_title, docket, court, decision_date):
+    parts = [case_title]
+    if docket:
+        parts.append(f"No. {docket}")
+    tail = []
+    if court:
+        tail.append(court)
+    if decision_date:
+        tail.append(decision_date)
+    if tail:
+        parts.append(f"({'; '.join(tail)})")
+    return ", ".join(parts)
 
 def write_case(pdf: Path, vol_state):
     full_text = read_pdf_text(pdf)
     header_lines, body_text = split_header_body(full_text)
     H = parse_header(header_lines)
 
-    # Required titles
     case_title = normalize(H["case_title"]) or pdf.stem
     docket = normalize(H["docket"])
     decision_date = normalize(H["decision_date"])
@@ -141,28 +151,23 @@ def write_case(pdf: Path, vol_state):
     disposition = normalize(H["disposition"])
     keywords = H["keywords"]
 
-    # Volume/Page reservation
     volume = vol_state["current_volume"]
     page_start, page_end = reserve_pages(vol_state, body_text)
-    reporter_cite = H["reporter_override"].strip() or f"{volume} M.2d {page_start}"
-    slipline = H["slip_override"].strip() or f"{case_title}, No. {docket} ({court}. {decision_date})"
+    reporter_cite = H["reporter_override"].strip() if H["reporter_override"] else f"{volume} M.2d {page_start}"
+    slipline = H["slip_override"].strip() if H["slip_override"] else build_slipline(case_title, docket, court, decision_date)
 
-    # Paths & slugs (both docket and reporter)
     docket_slug = make_slug(docket)
     title_slug = make_slug(case_title)
     path_slug = f"{page_start}-{title_slug}"
     out_dir = CASES / str(volume) / path_slug
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    # Inject page markers inside the opinion body only
     body_with_markers = inject_page_markers(volume, page_start, body_text)
     body_html = render_markdown_html(body_with_markers)
 
-    # Prev/Next (best-effort: link by page +/- 1 within same volume)
     prev_path = f"/cases/{volume}/{page_start-1}/" if page_start > 1 else ""
     next_path = f"/cases/{volume}/{page_end+1}/"
 
-    # Write case file
     fm = {
       "layout": "case",
       "title": case_title,

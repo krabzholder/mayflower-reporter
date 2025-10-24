@@ -40,8 +40,6 @@ a:hover{ text-decoration:underline }
 .site-footer{ margin-top:48px; border-top:1px solid var(--border); background:#fff }
 .site-footer__inner{ max-width:1100px; margin:0 auto; padding:12px 16px; color:var(--muted) }
 
-.case-page{ }
-
 .case-header{
   background:var(--card);
   border:1px solid var(--border);
@@ -83,6 +81,9 @@ a:hover{ text-decoration:underline }
   border:1px solid var(--border);
   border-radius:14px;
   padding:18px 22px;
+  /* 🔧 force normal wrapping; ignore embedded newlines */
+  white-space: normal;
+  word-break: normal;
 }
 
 /* Google-Scholar-like page markers in the gutter */
@@ -92,8 +93,8 @@ a:hover{ text-decoration:underline }
 .opinion .page-marker::after{
   content: attr(data-cite);
   position: sticky;
-  left: -110px;          /* positions into the gutter column */
-  top: 80px;             /* keeps it near the viewport top as you scroll */
+  left: -110px;
+  top: 80px;
   display:inline-block;
   width: 68px;
   text-align:center;
@@ -106,7 +107,7 @@ a:hover{ text-decoration:underline }
 }
 
 /* Body text */
-.opinion p{ margin: 0 0 1rem 0 }
+.opinion p{ margin: 0 0 1rem 0; white-space: normal; } /* 🔧 ensure paragraphs wrap normally */
 .opinion h2, .opinion h3 { margin:1.25rem 0 .75rem }
 
 /* Bottom nav */
@@ -119,7 +120,7 @@ a:hover{ text-decoration:underline }
 }
 .btn:hover{ background:#f9fafb }
 
-/* Print: approximate reporter feel */
+/* Print */
 @media print {
   .site-header, .site-footer, .nav, .case-nav, .gutter { display:none !important }
   body{ background:#fff }
